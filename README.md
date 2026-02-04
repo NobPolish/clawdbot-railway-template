@@ -28,8 +28,9 @@ In Railway Template Composer:
 2) Add a **Volume** mounted at `/data`.
 3) Set the following variables:
 
-Required:
-- `SETUP_PASSWORD` — user-provided password to access `/setup`
+**⚠️ REQUIRED:**
+- `SETUP_PASSWORD` — **MUST BE SET** - Strong password (16+ characters) to protect `/setup`  
+  ⚠️ **WARNING:** Deployment will fail to be usable without this variable!
 
 Recommended:
 - `OPENCLAW_STATE_DIR=/data/.openclaw`

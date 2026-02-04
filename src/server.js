@@ -201,8 +201,54 @@ function requireSetupAuth(req, res, next) {
   if (!SETUP_PASSWORD) {
     return res
       .status(500)
-      .type("text/plain")
-      .send("SETUP_PASSWORD is not set. Set it in Railway Variables before using /setup.");
+      .type("text/html")
+      .send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Setup Error - SETUP_PASSWORD Not Set</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+    h1 { color: #d32f2f; }
+    .error-box { background: #ffebee; border-left: 4px solid #d32f2f; padding: 15px; margin: 20px 0; }
+    .instructions { background: #f5f5f5; padding: 15px; border-radius: 4px; margin: 20px 0; }
+    .instructions h2 { margin-top: 0; color: #333; }
+    .instructions ol { margin-left: 0; padding-left: 20px; }
+    .instructions li { margin: 10px 0; line-height: 1.6; }
+    code { background: #e0e0e0; padding: 2px 6px; border-radius: 3px; font-family: 'Courier New', monospace; }
+  </style>
+</head>
+<body>
+  <h1>⚠️ SETUP_PASSWORD Not Set</h1>
+  <div class="error-box">
+    <strong>Error:</strong> The <code>SETUP_PASSWORD</code> environment variable is required but not configured.
+  </div>
+  
+  <div class="instructions">
+    <h2>📝 How to Fix This</h2>
+    <p><strong>For Railway Deployments:</strong></p>
+    <ol>
+      <li>Go to your Railway project dashboard</li>
+      <li>Click on your service</li>
+      <li>Go to the <strong>Variables</strong> tab</li>
+      <li>Click <strong>New Variable</strong></li>
+      <li>Set: <code>SETUP_PASSWORD</code> = <code>your-strong-password</code></li>
+      <li>Use a strong password with at least 16 characters</li>
+      <li>Wait for the service to redeploy</li>
+    </ol>
+    
+    <p><strong>For Local Development:</strong></p>
+    <ol>
+      <li>Copy <code>.env.example</code> to <code>.env</code></li>
+      <li>Set <code>SETUP_PASSWORD</code> in your <code>.env</code> file</li>
+      <li>Restart the server</li>
+    </ol>
+  </div>
+  
+  <p><em>Once configured, refresh this page to access the setup wizard.</em></p>
+</body>
+</html>
+`);
   }
 
   const header = req.headers.authorization || "";

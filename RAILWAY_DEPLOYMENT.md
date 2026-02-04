@@ -49,12 +49,19 @@ Before deploying, ensure you have:
 
 Configure these variables in Railway:
 
-#### Required Variables
+#### ⚠️ REQUIRED Variables
+
+**IMPORTANT:** The following variable MUST be set before deployment, or the application will not be usable:
 
 ```
 SETUP_PASSWORD=<your-strong-password>
 ```
-This password protects your `/setup` configuration panel.
+- **Must be at least 16 characters**
+- Use a mix of letters, numbers, and special characters
+- This password protects your `/setup` configuration panel
+- **DO NOT** deploy without setting this variable!
+
+💡 **Tip:** Railway will prompt you to set this variable if you have `.env.example` in your repo.
 
 #### Recommended Variables
 
@@ -140,7 +147,7 @@ This template is optimized for Railway deployment from Docker:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SETUP_PASSWORD` | ✅ Yes | - | Password for `/setup` access |
+| `SETUP_PASSWORD` | ✅ **YES** | - | **REQUIRED** - Password for `/setup` access. Must be at least 16 characters. |
 | `PORT` | No | 8080 | Port for web server |
 | `OPENCLAW_PUBLIC_PORT` | No | 8080 | Public-facing port |
 | `OPENCLAW_STATE_DIR` | No | `/data/.openclaw` | State directory path |
