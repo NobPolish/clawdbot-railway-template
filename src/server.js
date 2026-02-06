@@ -258,7 +258,6 @@ app.get("/setup/app.js", requireSetupAuth, (_req, res) => {
 });
 
 app.get("/setup", requireSetupAuth, (_req, res) => {
-  // No inline <script>: serve JS from /setup/app.js to avoid any encoding/template-literal issues.
   res.type("html").send(`<!doctype html>
 <html>
 <head>
@@ -266,121 +265,167 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OpenClaw Setup</title>
   <style>
-    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 2rem; max-width: 900px; }
-    .card { border: 1px solid #ddd; border-radius: 12px; padding: 1.25rem; margin: 1rem 0; }
-    label { display:block; margin-top: 0.75rem; font-weight: 600; }
-    input, select { width: 100%; padding: 0.6rem; margin-top: 0.25rem; }
-    button { padding: 0.8rem 1.2rem; border-radius: 10px; border: 0; background: #111; color: #fff; font-weight: 700; cursor: pointer; }
-    code { background: #f6f6f6; padding: 0.1rem 0.3rem; border-radius: 6px; }
-    .muted { color: #555; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: #fafafa; color: #111; line-height: 1.5; }
+    .wrap { max-width: 620px; margin: 0 auto; padding: 2rem 1.25rem; }
+    h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .status-bar { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #d4d4d4; flex-shrink: 0; }
+    .status-dot.ok { background: #22c55e; }
+    .status-dot.err { background: #ef4444; }
+    .status-text { flex: 1; font-size: 0.9rem; }
+    .status-links a { font-size: 0.85rem; color: #2563eb; text-decoration: none; }
+    .status-links a:hover { text-decoration: underline; }
+    .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 1.25rem; margin-bottom: 1rem; }
+    .card h2 { font-size: 1.05rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .hint { color: #666; font-size: 0.85rem; margin-bottom: 0.75rem; }
+    label { display: block; margin-top: 0.75rem; font-size: 0.85rem; font-weight: 600; color: #333; }
+    input, select, textarea { width: 100%; padding: 0.55rem 0.75rem; margin-top: 0.3rem; border: 1px solid #d4d4d4; border-radius: 8px; font-size: 0.9rem; background: #fff; color: #111; outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
+    .model-hint { color: #888; font-size: 0.8rem; margin-top: 0.25rem; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; padding: 0.6rem 1.25rem; border-radius: 8px; border: 0; font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #111; color: #fff; }
+    .btn-secondary { background: #e5e5e5; color: #333; }
+    .btn-danger { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+    .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #f5f5f5; border-radius: 8px; padding: 0.75rem; font-size: 0.8rem; margin-top: 0.75rem; max-height: 300px; overflow-y: auto; display: none; }
+    pre.visible { display: block; }
+    .toggle { font-size: 0.85rem; color: #2563eb; cursor: pointer; border: 0; background: 0; padding: 0; margin-top: 1rem; }
+    .toggle:hover { text-decoration: underline; }
+    .advanced { display: none; }
+    .advanced.open { display: block; }
+    .divider { border: 0; border-top: 1px solid #e5e5e5; margin: 1rem 0; }
+    code { background: #f0f0f0; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.85rem; }
   </style>
 </head>
 <body>
-  <h1>OpenClaw Setup</h1>
-  <p class="muted">This wizard configures OpenClaw by running the same onboarding command it uses in the terminal, but from the browser.</p>
+  <div class="wrap">
+    <h1>OpenClaw Setup</h1>
+    <p class="subtitle">Configure your OpenClaw instance in a few steps.</p>
 
-  <div class="card">
-    <h2>Status</h2>
-    <div id="status">Loading...</div>
-    <div style="margin-top: 0.75rem">
-      <a href="/openclaw" target="_blank">Open OpenClaw UI</a>
-      &nbsp;|&nbsp;
-      <a href="/setup/export" target="_blank">Download backup (.tar.gz)</a>
+    <div class="status-bar">
+      <span class="status-dot" id="statusDot"></span>
+      <span class="status-text" id="status">Loading...</span>
+      <span class="status-links">
+        <a href="/openclaw" target="_blank">Open UI</a>
+      </span>
     </div>
 
-    <div style="margin-top: 0.75rem">
-      <div class="muted" style="margin-bottom:0.25rem"><strong>Import backup</strong> (advanced): restores into <code>/data</code> and restarts the gateway.</div>
-      <input id="importFile" type="file" accept=".tar.gz,application/gzip" />
-      <button id="importRun" style="background:#7c2d12; margin-top:0.5rem">Import</button>
-      <pre id="importOut" style="white-space:pre-wrap"></pre>
-    </div>
-  </div>
+    <div class="card">
+      <h2>Provider</h2>
+      <p class="hint">Pick the AI provider and paste your API key.</p>
 
-  <div class="card">
-    <h2>Debug console</h2>
-    <p class="muted">Run a small allowlist of safe commands (no shell). Useful for debugging and recovery.</p>
-
-    <div style="display:flex; gap:0.5rem; align-items:center">
-      <select id="consoleCmd" style="flex: 1">
-        <option value="gateway.restart">gateway.restart (wrapper-managed)</option>
-        <option value="gateway.stop">gateway.stop (wrapper-managed)</option>
-        <option value="gateway.start">gateway.start (wrapper-managed)</option>
-        <option value="openclaw.status">openclaw status</option>
-        <option value="openclaw.health">openclaw health</option>
-        <option value="openclaw.doctor">openclaw doctor</option>
-        <option value="openclaw.logs.tail">openclaw logs --tail N</option>
-        <option value="openclaw.config.get">openclaw config get &lt;path&gt;</option>
-        <option value="openclaw.version">openclaw --version</option>
+      <label>Provider</label>
+      <select id="authChoice">
+        <option value="openrouter-api-key">OpenRouter</option>
+        <option value="openai-api-key">OpenAI</option>
+        <option value="apiKey">Anthropic</option>
+        <option value="gemini-api-key">Google Gemini</option>
+        <option value="ai-gateway-api-key">Vercel AI Gateway</option>
+        <option value="moonshot-api-key">Moonshot AI</option>
+        <option value="minimax-api">MiniMax</option>
+        <option value="claude-cli">Anthropic (Claude CLI token)</option>
+        <option value="codex-cli">OpenAI (Codex CLI OAuth)</option>
       </select>
-      <input id="consoleArg" placeholder="Optional arg (e.g. 200, gateway.port)" style="flex: 1" />
-      <button id="consoleRun" style="background:#0f172a">Run</button>
-    </div>
-    <pre id="consoleOut" style="white-space:pre-wrap"></pre>
-  </div>
 
-  <div class="card">
-    <h2>Config editor (advanced)</h2>
-    <p class="muted">Edits the full config file on disk (JSON5). Saving creates a timestamped <code>.bak-*</code> backup and restarts the gateway.</p>
-    <div class="muted" id="configPath"></div>
-    <textarea id="configText" style="width:100%; height: 260px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
-    <div style="margin-top:0.5rem">
-      <button id="configReload" style="background:#1f2937">Reload</button>
-      <button id="configSave" style="background:#111; margin-left:0.5rem">Save</button>
-    </div>
-    <pre id="configOut" style="white-space:pre-wrap"></pre>
-  </div>
+      <label>API Key</label>
+      <input id="authSecret" type="password" placeholder="sk-or-v1-... / sk-..." autocomplete="off" />
 
-  <div class="card">
-    <h2>1) Model/auth provider</h2>
-    <p class="muted">Matches the groups shown in the terminal onboarding.</p>
-    <label>Provider group</label>
-    <select id="authGroup"></select>
+      <label id="modelLabel">Model</label>
+      <input id="model" type="text" placeholder="anthropic/claude-sonnet-4" autocomplete="off" />
+      <div class="model-hint" id="modelHint">
+        OpenRouter format: <code>provider/model-name</code>. Examples: <code>anthropic/claude-sonnet-4</code>, <code>openai/gpt-4o</code>, <code>google/gemini-2.5-pro</code>
+      </div>
 
-    <label>Auth method</label>
-    <select id="authChoice"></select>
-
-    <label>Key / Token (if required)</label>
-    <input id="authSecret" type="password" placeholder="Paste API key / token if applicable" />
-
-    <label>Wizard flow</label>
-    <select id="flow">
-      <option value="quickstart">quickstart</option>
-      <option value="advanced">advanced</option>
-      <option value="manual">manual</option>
-    </select>
-  </div>
-
-  <div class="card">
-    <h2>2) Optional: Channels</h2>
-    <p class="muted">You can also add channels later inside OpenClaw, but this helps you get messaging working immediately.</p>
-
-    <label>Telegram bot token (optional)</label>
-    <input id="telegramToken" type="password" placeholder="123456:ABC..." />
-    <div class="muted" style="margin-top: 0.25rem">
-      Get it from BotFather: open Telegram, message <code>@BotFather</code>, run <code>/newbot</code>, then copy the token.
+      <input type="hidden" id="flow" value="quickstart" />
     </div>
 
-    <label>Discord bot token (optional)</label>
-    <input id="discordToken" type="password" placeholder="Bot token" />
-    <div class="muted" style="margin-top: 0.25rem">
-      Get it from the Discord Developer Portal: create an application, add a Bot, then copy the Bot Token.<br/>
-      <strong>Important:</strong> Enable <strong>MESSAGE CONTENT INTENT</strong> in Bot → Privileged Gateway Intents, or the bot will crash on startup.
+    <div class="card">
+      <h2>Channels (optional)</h2>
+      <p class="hint">Connect a chat platform now, or do it later from the OpenClaw UI.</p>
+
+      <label>Telegram bot token</label>
+      <input id="telegramToken" type="password" placeholder="123456:ABC..." autocomplete="off" />
+      <div class="model-hint">From <code>@BotFather</code> on Telegram.</div>
+
+      <label>Discord bot token</label>
+      <input id="discordToken" type="password" placeholder="Bot token" autocomplete="off" />
+      <div class="model-hint">From the Discord Developer Portal. Enable MESSAGE CONTENT INTENT.</div>
+
+      <button class="toggle" id="toggleSlack">+ Slack</button>
+      <div class="advanced" id="slackSection">
+        <label>Slack bot token</label>
+        <input id="slackBotToken" type="password" placeholder="xoxb-..." autocomplete="off" />
+        <label>Slack app token</label>
+        <input id="slackAppToken" type="password" placeholder="xapp-..." autocomplete="off" />
+      </div>
     </div>
 
-    <label>Slack bot token (optional)</label>
-    <input id="slackBotToken" type="password" placeholder="xoxb-..." />
+    <div class="card">
+      <div class="actions">
+        <button class="btn btn-primary" id="run">Run Setup</button>
+        <button class="btn btn-danger" id="reset">Reset</button>
+      </div>
+      <pre id="log"></pre>
+    </div>
 
-    <label>Slack app token (optional)</label>
-    <input id="slackAppToken" type="password" placeholder="xapp-..." />
-  </div>
+    <button class="toggle" id="toggleAdvanced">Advanced tools</button>
+    <div class="advanced" id="advancedSection">
+      <div class="card" style="margin-top: 0.75rem">
+        <h2>Debug console</h2>
+        <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
+          <select id="consoleCmd" style="flex:2">
+            <option value="gateway.restart">gateway.restart</option>
+            <option value="gateway.stop">gateway.stop</option>
+            <option value="gateway.start">gateway.start</option>
+            <option value="openclaw.status">openclaw status</option>
+            <option value="openclaw.health">openclaw health</option>
+            <option value="openclaw.doctor">openclaw doctor</option>
+            <option value="openclaw.logs.tail">openclaw logs --tail N</option>
+            <option value="openclaw.config.get">openclaw config get (path)</option>
+            <option value="openclaw.version">openclaw --version</option>
+          </select>
+          <input id="consoleArg" placeholder="arg" style="flex:1" />
+          <button class="btn btn-secondary" id="consoleRun">Run</button>
+        </div>
+        <pre id="consoleOut"></pre>
+      </div>
 
-  <div class="card">
-    <h2>3) Run onboarding</h2>
-    <button id="run">Run setup</button>
-    <button id="pairingApprove" style="background:#1f2937; margin-left:0.5rem">Approve pairing</button>
-    <button id="reset" style="background:#444; margin-left:0.5rem">Reset setup</button>
-    <pre id="log" style="white-space:pre-wrap"></pre>
-    <p class="muted">Reset deletes the OpenClaw config file so you can rerun onboarding. Pairing approval lets you grant DM access when dmPolicy=pairing.</p>
+      <div class="card">
+        <h2>Config editor</h2>
+        <div class="hint" id="configPath"></div>
+        <textarea id="configText" style="height:200px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:0.8rem"></textarea>
+        <div class="actions">
+          <button class="btn btn-secondary" id="configReload">Reload</button>
+          <button class="btn btn-primary" id="configSave">Save & Restart</button>
+        </div>
+        <pre id="configOut"></pre>
+      </div>
+
+      <div class="card">
+        <h2>Backup</h2>
+        <div class="actions">
+          <a href="/setup/export" class="btn btn-secondary" target="_blank">Download backup</a>
+        </div>
+        <hr class="divider" />
+        <label>Import backup (.tar.gz)</label>
+        <input id="importFile" type="file" accept=".tar.gz,application/gzip" />
+        <div class="actions">
+          <button class="btn btn-danger" id="importRun">Import</button>
+        </div>
+        <pre id="importOut"></pre>
+      </div>
+
+      <div class="card">
+        <h2>Pairing</h2>
+        <p class="hint">Approve DM access when dmPolicy=pairing.</p>
+        <div class="actions">
+          <button class="btn btn-secondary" id="pairingApprove">Approve pairing code</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="/setup/app.js"></script>
@@ -390,64 +435,10 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 
 app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
   const version = await runCmd(OPENCLAW_NODE, clawArgs(["--version"]));
-  const channelsHelp = await runCmd(OPENCLAW_NODE, clawArgs(["channels", "add", "--help"]));
-
-  // We reuse OpenClaw's own auth-choice grouping logic indirectly by hardcoding the same group defs.
-  // This is intentionally minimal; later we can parse the CLI help output to stay perfectly in sync.
-  const authGroups = [
-    { value: "openai", label: "OpenAI", hint: "Codex OAuth + API key", options: [
-      { value: "codex-cli", label: "OpenAI Codex OAuth (Codex CLI)" },
-      { value: "openai-codex", label: "OpenAI Codex (ChatGPT OAuth)" },
-      { value: "openai-api-key", label: "OpenAI API key" }
-    ]},
-    { value: "anthropic", label: "Anthropic", hint: "Claude Code CLI + API key", options: [
-      { value: "claude-cli", label: "Anthropic token (Claude Code CLI)" },
-      { value: "token", label: "Anthropic token (paste setup-token)" },
-      { value: "apiKey", label: "Anthropic API key" }
-    ]},
-    { value: "google", label: "Google", hint: "Gemini API key + OAuth", options: [
-      { value: "gemini-api-key", label: "Google Gemini API key" },
-      { value: "google-antigravity", label: "Google Antigravity OAuth" },
-      { value: "google-gemini-cli", label: "Google Gemini CLI OAuth" }
-    ]},
-    { value: "openrouter", label: "OpenRouter", hint: "API key", options: [
-      { value: "openrouter-api-key", label: "OpenRouter API key" }
-    ]},
-    { value: "ai-gateway", label: "Vercel AI Gateway", hint: "API key", options: [
-      { value: "ai-gateway-api-key", label: "Vercel AI Gateway API key" }
-    ]},
-    { value: "moonshot", label: "Moonshot AI", hint: "Kimi K2 + Kimi Code", options: [
-      { value: "moonshot-api-key", label: "Moonshot AI API key" },
-      { value: "kimi-code-api-key", label: "Kimi Code API key" }
-    ]},
-    { value: "zai", label: "Z.AI (GLM 4.7)", hint: "API key", options: [
-      { value: "zai-api-key", label: "Z.AI (GLM 4.7) API key" }
-    ]},
-    { value: "minimax", label: "MiniMax", hint: "M2.1 (recommended)", options: [
-      { value: "minimax-api", label: "MiniMax M2.1" },
-      { value: "minimax-api-lightning", label: "MiniMax M2.1 Lightning" }
-    ]},
-    { value: "qwen", label: "Qwen", hint: "OAuth", options: [
-      { value: "qwen-portal", label: "Qwen OAuth" }
-    ]},
-    { value: "copilot", label: "Copilot", hint: "GitHub + local proxy", options: [
-      { value: "github-copilot", label: "GitHub Copilot (GitHub device login)" },
-      { value: "copilot-proxy", label: "Copilot Proxy (local)" }
-    ]},
-    { value: "synthetic", label: "Synthetic", hint: "Anthropic-compatible (multi-model)", options: [
-      { value: "synthetic-api-key", label: "Synthetic API key" }
-    ]},
-    { value: "opencode-zen", label: "OpenCode Zen", hint: "API key", options: [
-      { value: "opencode-zen", label: "OpenCode Zen (multi-model proxy)" }
-    ]}
-  ];
 
   res.json({
     configured: isConfigured(),
-    gatewayTarget: GATEWAY_TARGET,
     openclawVersion: version.output.trim(),
-    channelsAddHelp: channelsHelp.output,
-    authGroups,
   });
 });
 
@@ -502,6 +493,12 @@ function buildOnboardArgs(payload) {
       // This is the Anthropics setup-token flow.
       args.push("--token-provider", "anthropic", "--token", secret);
     }
+  }
+
+  // Pass model through if provided (critical for OpenRouter, optional for others).
+  const model = (payload.model || "").trim();
+  if (model) {
+    args.push("--model", model);
   }
 
   return args;
@@ -560,6 +557,14 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]));
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.bind", "loopback"]));
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.port", String(INTERNAL_GATEWAY_PORT)]));
+
+    // Ensure model is written into config (important for OpenRouter where the CLI may not
+    // recognise --model during non-interactive onboarding).
+    const modelVal = (payload.model || "").trim();
+    if (modelVal) {
+      const setModel = await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "model", modelVal]));
+      extra += `\n[model] set to ${modelVal} (exit=${setModel.code})\n`;
+    }
 
     const channelsHelp = await runCmd(OPENCLAW_NODE, clawArgs(["channels", "add", "--help"]));
     const helpText = channelsHelp.output || "";
