@@ -227,12 +227,28 @@ async function startGateway() {
 
 async function ensureGatewayRunning() {
   if (!isConfigured()) return { ok: false, reason: "not configured" };
-  if (gatewayProc) return { ok: true };
+  // Quick check: if the process is alive, verify it's actually responding.
+  if (gatewayProc) {
+    // Fast readiness probe (1s) -- if already running it should respond quickly.
+    const alive = await waitForGatewayReady({ timeoutMs: 2_000 });
+    if (alive) return { ok: true };
+    // Process object exists but not responding -- kill and restart.
+    console.warn("[wrapper] gateway process exists but not responding, restarting...");
+    try { gatewayProc.kill("SIGTERM"); } catch { /* ignore */ }
+    await sleep(500);
+    gatewayProc = null;
+  }
   if (!gatewayStarting) {
     gatewayStarting = (async () => {
       await startGateway();
-      const ready = await waitForGatewayReady({ timeoutMs: 20_000 });
+      // Railway cold starts can be slow; give it up to 45s.
+      const ready = await waitForGatewayReady({ timeoutMs: 45_000 });
       if (!ready) {
+        // Kill the zombie process if it didn't become ready.
+        if (gatewayProc) {
+          try { gatewayProc.kill("SIGTERM"); } catch { /* ignore */ }
+          gatewayProc = null;
+        }
         throw new Error("Gateway did not become ready in time");
       }
     })().finally(() => {
@@ -1739,7 +1755,42 @@ app.use(async (req, res) => {
     try {
       await ensureGatewayRunning();
     } catch (err) {
-      return res.status(503).type("text/plain").send(`Gateway not ready: ${String(err)}`);
+      const errMsg = escapeHtml(String(err));
+      return res.status(503).type("html").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Gateway Starting - OpenClaw</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#09090b;color:#fafafa;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.c{max-width:420px;width:100%;padding:1.5rem;text-align:center}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.spinner{width:32px;height:32px;border:3px solid #27272a;border-top-color:#3b82f6;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 1.5rem}
+h1{font-size:1rem;font-weight:600;margin-bottom:0.375rem;animation:fadeUp 0.4s ease both}
+.desc{color:#71717a;font-size:0.8125rem;margin-bottom:1.5rem;line-height:1.5;animation:fadeUp 0.4s ease 0.05s both}
+.err{background:rgba(239,68,68,0.08);border:1px solid rgba(127,29,29,0.4);border-radius:8px;padding:0.625rem 0.875rem;font-size:0.75rem;color:#fca5a5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-bottom:1.5rem;text-align:left;word-break:break-word;animation:fadeUp 0.4s ease 0.1s both}
+.actions{display:flex;gap:0.5rem;justify-content:center;animation:fadeUp 0.4s ease 0.15s both}
+.btn{display:inline-flex;align-items:center;gap:0.375rem;padding:0.4375rem 0.875rem;border-radius:8px;font-size:0.8125rem;font-weight:600;cursor:pointer;border:1px solid transparent;text-decoration:none;transition:all 0.15s}
+.btn-primary{background:#fafafa;color:#09090b;border-color:#fafafa}
+.btn-primary:hover{background:#e4e4e7}
+.btn-secondary{background:#1c1c21;color:#a1a1aa;border-color:#27272a}
+.btn-secondary:hover{background:#27272a;color:#fafafa}
+.auto{color:#52525b;font-size:0.6875rem;margin-top:1.25rem;animation:fadeUp 0.4s ease 0.2s both}
+</style>
+</head><body>
+<div class="c">
+<div class="spinner" role="status" aria-label="Loading"></div>
+<h1>Gateway is starting up</h1>
+<p class="desc">The OpenClaw gateway is taking longer than expected. This can happen on cold starts.</p>
+<div class="err">${errMsg}</div>
+<div class="actions">
+<button class="btn btn-primary" onclick="location.reload()">Retry</button>
+<a href="/setup" class="btn btn-secondary">Go to Setup</a>
+</div>
+<p class="auto">This page will auto-retry in <span id="cd">10</span>s</p>
+</div>
+<script>let t=10;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
+</body></html>`);
     }
   }
 
