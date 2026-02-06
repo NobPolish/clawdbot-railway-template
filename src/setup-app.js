@@ -3,9 +3,14 @@
 
 (function () {
   var statusEl = document.getElementById('status');
-  var authGroupEl = document.getElementById('authGroup');
-  var authChoiceEl = document.getElementById('authChoice');
+  var statusDot = document.getElementById('statusDot');
   var logEl = document.getElementById('log');
+
+  // Provider fields
+  var authChoiceEl = document.getElementById('authChoice');
+  var modelEl = document.getElementById('model');
+  var modelLabelEl = document.getElementById('modelLabel');
+  var modelHintEl = document.getElementById('modelHint');
 
   // Debug console
   var consoleCmdEl = document.getElementById('consoleCmd');
@@ -25,37 +30,68 @@
   var importRunEl = document.getElementById('importRun');
   var importOutEl = document.getElementById('importOut');
 
-  function setStatus(s) {
-    statusEl.textContent = s;
+  // Toggles
+  var toggleSlack = document.getElementById('toggleSlack');
+  var slackSection = document.getElementById('slackSection');
+  var toggleAdvanced = document.getElementById('toggleAdvanced');
+  var advancedSection = document.getElementById('advancedSection');
+
+  // Model field visibility based on provider
+  var providersWithModel = {
+    'openrouter-api-key': { placeholder: 'anthropic/claude-sonnet-4', hint: 'OpenRouter format: provider/model-name. Examples: anthropic/claude-sonnet-4, openai/gpt-4o, google/gemini-2.5-pro' },
+    'openai-api-key': { placeholder: 'gpt-4o', hint: 'e.g. gpt-4o, gpt-4o-mini, o1-preview' },
+    'gemini-api-key': { placeholder: 'gemini-2.5-pro', hint: 'e.g. gemini-2.5-pro, gemini-2.5-flash' },
+    'ai-gateway-api-key': { placeholder: 'anthropic/claude-sonnet-4', hint: 'provider/model format via Vercel AI Gateway' },
+    'apiKey': { placeholder: 'claude-sonnet-4-20250514', hint: 'e.g. claude-sonnet-4-20250514, claude-opus-4-20250514' }
+  };
+
+  function updateModelVisibility() {
+    var choice = authChoiceEl.value;
+    var cfg = providersWithModel[choice];
+    if (cfg) {
+      modelEl.style.display = '';
+      modelLabelEl.style.display = '';
+      modelHintEl.style.display = '';
+      modelEl.placeholder = cfg.placeholder;
+      modelHintEl.textContent = cfg.hint;
+    } else {
+      modelEl.style.display = 'none';
+      modelLabelEl.style.display = 'none';
+      modelHintEl.style.display = 'none';
+    }
   }
 
-  function renderAuth(groups) {
-    authGroupEl.innerHTML = '';
-    for (var i = 0; i < groups.length; i++) {
-      var g = groups[i];
-      var opt = document.createElement('option');
-      opt.value = g.value;
-      opt.textContent = g.label + (g.hint ? ' - ' + g.hint : '');
-      authGroupEl.appendChild(opt);
-    }
+  authChoiceEl.onchange = updateModelVisibility;
+  updateModelVisibility();
 
-    authGroupEl.onchange = function () {
-      var sel = null;
-      for (var j = 0; j < groups.length; j++) {
-        if (groups[j].value === authGroupEl.value) sel = groups[j];
-      }
-      authChoiceEl.innerHTML = '';
-      var opts = (sel && sel.options) ? sel.options : [];
-      for (var k = 0; k < opts.length; k++) {
-        var o = opts[k];
-        var opt2 = document.createElement('option');
-        opt2.value = o.value;
-        opt2.textContent = o.label + (o.hint ? ' - ' + o.hint : '');
-        authChoiceEl.appendChild(opt2);
-      }
+  // Toggle handlers
+  if (toggleSlack && slackSection) {
+    toggleSlack.onclick = function () {
+      var open = slackSection.classList.toggle('open');
+      toggleSlack.textContent = open ? '- Slack' : '+ Slack';
     };
+  }
 
-    authGroupEl.onchange();
+  if (toggleAdvanced && advancedSection) {
+    toggleAdvanced.onclick = function () {
+      var open = advancedSection.classList.toggle('open');
+      toggleAdvanced.textContent = open ? 'Hide advanced tools' : 'Advanced tools';
+    };
+  }
+
+  function showLog(text) {
+    logEl.textContent = text;
+    logEl.classList.add('visible');
+  }
+
+  function appendLog(text) {
+    logEl.textContent += text;
+    logEl.classList.add('visible');
+  }
+
+  function setStatus(text, ok) {
+    statusEl.textContent = text;
+    statusDot.className = 'status-dot' + (ok === true ? ' ok' : ok === false ? ' err' : '');
   }
 
   function httpJson(url, opts) {
@@ -72,38 +108,37 @@
   }
 
   function refreshStatus() {
-    setStatus('Loading...');
+    setStatus('Loading...', null);
     return httpJson('/setup/api/status').then(function (j) {
-      var ver = j.openclawVersion ? (' | ' + j.openclawVersion) : '';
-      setStatus((j.configured ? 'Configured - open /openclaw' : 'Not configured - run setup below') + ver);
-      renderAuth(j.authGroups || []);
-      // If channels are unsupported, surface it for debugging.
-      if (j.channelsAddHelp && j.channelsAddHelp.indexOf('telegram') === -1) {
-        logEl.textContent += '\nNote: this openclaw build does not list telegram in `channels add --help`. Telegram auto-add will be skipped.\n';
+      var ver = j.openclawVersion ? (' v' + j.openclawVersion) : '';
+      if (j.configured) {
+        setStatus('Configured' + ver + ' - ready to use', true);
+      } else {
+        setStatus('Not configured' + ver + ' - fill in the form below', false);
       }
 
-      // Attempt to load config editor content if present.
       if (configReloadEl && configTextEl) {
         loadConfigRaw();
       }
-
     }).catch(function (e) {
-      setStatus('Error: ' + String(e));
+      setStatus('Error: ' + String(e), false);
     });
   }
 
+  // Run setup
   document.getElementById('run').onclick = function () {
     var payload = {
       flow: document.getElementById('flow').value,
       authChoice: authChoiceEl.value,
       authSecret: document.getElementById('authSecret').value,
+      model: modelEl.value,
       telegramToken: document.getElementById('telegramToken').value,
       discordToken: document.getElementById('discordToken').value,
       slackBotToken: document.getElementById('slackBotToken').value,
       slackAppToken: document.getElementById('slackAppToken').value
     };
 
-    logEl.textContent = 'Running...\n';
+    showLog('Running setup...\n');
 
     fetch('/setup/api/run', {
       method: 'POST',
@@ -115,19 +150,29 @@
     }).then(function (text) {
       var j;
       try { j = JSON.parse(text); } catch (_e) { j = { ok: false, output: text }; }
-      logEl.textContent += (j.output || JSON.stringify(j, null, 2));
+      appendLog(j.output || JSON.stringify(j, null, 2));
       return refreshStatus();
     }).catch(function (e) {
-      logEl.textContent += '\nError: ' + String(e) + '\n';
+      appendLog('\nError: ' + String(e) + '\n');
     });
   };
 
-  // Debug console runner
+  // Reset
+  document.getElementById('reset').onclick = function () {
+    if (!confirm('Reset setup? This deletes the config file so onboarding can run again.')) return;
+    showLog('Resetting...\n');
+    fetch('/setup/api/reset', { method: 'POST', credentials: 'same-origin' })
+      .then(function (res) { return res.text(); })
+      .then(function (t) { appendLog(t + '\n'); return refreshStatus(); })
+      .catch(function (e) { appendLog('Error: ' + String(e) + '\n'); });
+  };
+
+  // Debug console
   function runConsole() {
     if (!consoleCmdEl || !consoleRunEl) return;
     var cmd = consoleCmdEl.value;
     var arg = consoleArgEl ? consoleArgEl.value : '';
-    if (consoleOutEl) consoleOutEl.textContent = 'Running ' + cmd + '...\n';
+    if (consoleOutEl) { consoleOutEl.textContent = 'Running ' + cmd + '...\n'; consoleOutEl.classList.add('visible'); }
 
     return httpJson('/setup/api/console/run', {
       method: 'POST',
@@ -145,30 +190,30 @@
     consoleRunEl.onclick = runConsole;
   }
 
-  // Config raw load/save
+  // Config editor
   function loadConfigRaw() {
     if (!configTextEl) return;
     if (configOutEl) configOutEl.textContent = '';
     return httpJson('/setup/api/config/raw').then(function (j) {
       if (configPathEl) {
-        configPathEl.textContent = 'Config file: ' + (j.path || '(unknown)') + (j.exists ? '' : ' (does not exist yet)');
+        configPathEl.textContent = 'File: ' + (j.path || '(unknown)') + (j.exists ? '' : ' (not yet created)');
       }
       configTextEl.value = j.content || '';
     }).catch(function (e) {
-      if (configOutEl) configOutEl.textContent = 'Error loading config: ' + String(e);
+      if (configOutEl) { configOutEl.textContent = 'Error: ' + String(e); configOutEl.classList.add('visible'); }
     });
   }
 
   function saveConfigRaw() {
     if (!configTextEl) return;
-    if (!confirm('Save config and restart gateway? A timestamped .bak backup will be created.')) return;
-    if (configOutEl) configOutEl.textContent = 'Saving...\n';
+    if (!confirm('Save config and restart gateway?')) return;
+    if (configOutEl) { configOutEl.textContent = 'Saving...\n'; configOutEl.classList.add('visible'); }
     return httpJson('/setup/api/config/raw', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ content: configTextEl.value })
     }).then(function (j) {
-      if (configOutEl) configOutEl.textContent = 'Saved: ' + (j.path || '') + '\nGateway restarted.\n';
+      if (configOutEl) configOutEl.textContent = 'Saved. Gateway restarted.\n';
       return refreshStatus();
     }).catch(function (e) {
       if (configOutEl) configOutEl.textContent += '\nError: ' + String(e) + '\n';
@@ -178,17 +223,14 @@
   if (configReloadEl) configReloadEl.onclick = loadConfigRaw;
   if (configSaveEl) configSaveEl.onclick = saveConfigRaw;
 
-  // Import backup
+  // Import
   function runImport() {
     if (!importRunEl || !importFileEl) return;
     var f = importFileEl.files && importFileEl.files[0];
-    if (!f) {
-      alert('Pick a .tar.gz file first');
-      return;
-    }
-    if (!confirm('Import backup? This overwrites files under /data and restarts the gateway.')) return;
+    if (!f) { alert('Pick a .tar.gz file first'); return; }
+    if (!confirm('Import backup? This overwrites files and restarts the gateway.')) return;
 
-    if (importOutEl) importOutEl.textContent = 'Uploading ' + f.name + ' (' + f.size + ' bytes)...\n';
+    if (importOutEl) { importOutEl.textContent = 'Uploading...\n'; importOutEl.classList.add('visible'); }
 
     return f.arrayBuffer().then(function (buf) {
       return fetch('/setup/import', {
@@ -200,7 +242,6 @@
     }).then(function (res) {
       return res.text().then(function (t) {
         if (importOutEl) importOutEl.textContent += t + '\n';
-        if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + t);
         return refreshStatus();
       });
     }).catch(function (e) {
@@ -210,39 +251,30 @@
 
   if (importRunEl) importRunEl.onclick = runImport;
 
-  // Pairing approve helper
+  // Pairing
   var pairingBtn = document.getElementById('pairingApprove');
   if (pairingBtn) {
     pairingBtn.onclick = function () {
-      var channel = prompt('Enter channel (telegram or discord):');
+      var channel = prompt('Channel (telegram or discord):');
       if (!channel) return;
       channel = channel.trim().toLowerCase();
       if (channel !== 'telegram' && channel !== 'discord') {
-        alert('Channel must be "telegram" or "discord"');
+        alert('Must be "telegram" or "discord"');
         return;
       }
-      var code = prompt('Enter pairing code (e.g. 3EY4PUYS):');
+      var code = prompt('Pairing code:');
       if (!code) return;
-      logEl.textContent += '\nApproving pairing for ' + channel + '...\n';
+      showLog('Approving pairing for ' + channel + '...\n');
       fetch('/setup/api/pairing/approve', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ channel: channel, code: code.trim() })
       }).then(function (r) { return r.text(); })
-        .then(function (t) { logEl.textContent += t + '\n'; })
-        .catch(function (e) { logEl.textContent += 'Error: ' + String(e) + '\n'; });
+        .then(function (t) { appendLog(t + '\n'); })
+        .catch(function (e) { appendLog('Error: ' + String(e) + '\n'); });
     };
   }
-
-  document.getElementById('reset').onclick = function () {
-    if (!confirm('Reset setup? This deletes the config file so onboarding can run again.')) return;
-    logEl.textContent = 'Resetting...\n';
-    fetch('/setup/api/reset', { method: 'POST', credentials: 'same-origin' })
-      .then(function (res) { return res.text(); })
-      .then(function (t) { logEl.textContent += t + '\n'; return refreshStatus(); })
-      .catch(function (e) { logEl.textContent += 'Error: ' + String(e) + '\n'; });
-  };
 
   refreshStatus();
 })();
