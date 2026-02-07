@@ -1,22 +1,22 @@
 {
-  "name": "openclaw-railway-template",
+  "name": "clawdbot-dashboard",
   "private": true,
-  "type": "module",
-  "engines": {
-    "node": ">=22"
-  },
   "scripts": {
-    "dev": "node src/server.js",
-    "start": "node src/server.js",
-    "lint": "node -c src/server.js",
-    "smoke": "node scripts/smoke.js"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
   },
   "dependencies": {
     "@supabase/ssr": "^0.8.0",
-    "express": "^5.1.0",
-    "express-session": "^1.18.1",
-    "http-proxy": "^1.18.1",
+    "@supabase/supabase-js": "^2.49.0",
+    "next": "^15.3.0",
     "react": "^19.2.4",
-    "tar": "^7.5.4"
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
   }
 }
