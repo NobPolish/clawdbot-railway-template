@@ -31,6 +31,39 @@ const WORKSPACE_DIR =
   process.env.CLAWDBOT_WORKSPACE_DIR?.trim() ||
   path.join(STATE_DIR, "workspace");
 
+// Setup password configuration.
+// If SETUP_PASSWORD is not set, generate a secure random password and log it.
+function resolveSetupPassword() {
+  const envPassword = process.env.SETUP_PASSWORD?.trim();
+  if (envPassword) return envPassword;
+
+  const passwordPath = path.join(STATE_DIR, "setup.password");
+  try {
+    const existing = fs.readFileSync(passwordPath, "utf8").trim();
+    if (existing) return existing;
+  } catch {
+    // First run
+  }
+
+  const generated = crypto.randomBytes(16).toString("hex");
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(passwordPath, generated, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // best-effort
+  }
+  console.log("=".repeat(80));
+  console.log("SETUP_PASSWORD was not configured. Auto-generated password:");
+  console.log("");
+  console.log(`  ${generated}`);
+  console.log("");
+  console.log("Save this password to access /setup. Set SETUP_PASSWORD env var to use a custom password.");
+  console.log("=".repeat(80));
+  return generated;
+}
+
+const SETUP_PASSWORD = resolveSetupPassword();
+
 // GitHub OAuth configuration.
 // Required env vars: GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
 // Optional: GITHUB_ALLOWED_USERS (comma-separated list of GitHub usernames)
@@ -344,21 +377,24 @@ function requireAuth(req, res, next) {
     req.path === "/auth/github" ||
     req.path === "/auth/github/callback" ||
     req.path === "/auth/login" ||
+    req.path === "/auth/password" ||
     req.path === "/setup/healthz"
   ) {
     return next();
   }
 
-  // If GitHub OAuth is not configured, fall through (allow access).
-  // This lets users still complete initial setup before configuring OAuth.
-  if (!isAuthConfigured()) {
+  // Check if user is authenticated via GitHub OAuth
+  if (isAuthConfigured() && req.session?.user) {
     return next();
   }
 
-  if (req.session?.user) {
+  // Check if user is authenticated via password
+  if (req.session?.passwordAuth) {
     return next();
   }
 
+  // If neither GitHub OAuth nor password auth is configured, this is an error state
+  // Always require password authentication (SETUP_PASSWORD always exists)
   // For API calls, return 401
   if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
     return res.status(401).json({ error: "Not authenticated" });
@@ -384,15 +420,19 @@ function loginPageHTML(error) {
   const errorBlock = error
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
-  const notConfigured = !isAuthConfigured()
-    ? `<div class="alert alert-warn">
+  const oauthConfigured = isAuthConfigured();
+  const notConfigured = !oauthConfigured
+    ? `<div class="alert alert-warn" style="margin-top: 1rem;">
         <strong>GitHub OAuth not configured.</strong><br/>
-        Set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> in your Railway variables.<br/>
+        Set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> in your Railway variables to enable GitHub sign-in.<br/>
         Optionally set <code>GITHUB_ALLOWED_USERS</code> to restrict access.
       </div>`
     : "";
-  const btnDisabled = !isAuthConfigured() ? "disabled" : "";
-  const btnCls = !isAuthConfigured() ? "btn-github disabled" : "btn-github";
+  const btnDisabled = !oauthConfigured ? "disabled" : "";
+  const btnCls = !oauthConfigured ? "btn-github disabled" : "btn-github";
+  const divider = oauthConfigured
+    ? `<div class="divider">or</div>`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -455,19 +495,55 @@ function loginPageHTML(error) {
       font-size: 0.75rem; color: #d4d4d8;
       font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
     }
-    .btn-github {
+    .password-form {
+      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.2s both;
+    }
+    .form-label {
+      display: block; font-size: 0.75rem; font-weight: 500; color: #a1a1aa;
+      margin-bottom: 0.375rem; letter-spacing: 0.01em;
+    }
+    .form-input {
+      width: 100%; padding: 0.6875rem 0.875rem; border-radius: 10px;
+      border: 1px solid #232329; background: #131316; color: #fafafa;
+      font-size: 0.8125rem; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      letter-spacing: 0.04em;
+      transition: all 0.15s cubic-bezier(0.4,0,0.2,1);
+      margin-bottom: 1rem;
+    }
+    .form-input:focus {
+      outline: none; border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+    }
+    .btn {
       display: flex; align-items: center; justify-content: center; gap: 0.5rem;
       width: 100%; padding: 0.6875rem 1rem; border-radius: 10px;
-      border: 1px solid #232329; background: #fafafa; color: #09090b;
       font-size: 0.8125rem; font-weight: 600; cursor: pointer;
       transition: all 0.15s cubic-bezier(0.4,0,0.2,1);
-      text-decoration: none; position: relative;
-      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.2s both;
+      text-decoration: none; position: relative; border: none;
+    }
+    .btn-primary {
+      background: #3b82f6; color: #fafafa; border: 1px solid #3b82f6;
+    }
+    .btn-primary:hover { background: #2563eb; border-color: #2563eb; box-shadow: 0 2px 12px rgba(59,130,246,0.24); }
+    .btn-primary:active { transform: scale(0.98); }
+    .btn-github {
+      border: 1px solid #232329; background: #fafafa; color: #09090b;
     }
     .btn-github:hover { background: #e4e4e7; box-shadow: 0 2px 12px rgba(250,250,250,0.08); }
     .btn-github:active { transform: scale(0.98); }
     .btn-github.disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
-    .btn-github svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .divider {
+      text-align: center; margin: 1.5rem 0; color: #52525b; font-size: 0.75rem;
+      position: relative;
+      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.25s both;
+    }
+    .divider::before, .divider::after {
+      content: ''; position: absolute; top: 50%; height: 1px;
+      background: #232329; width: calc(50% - 1.25rem);
+    }
+    .divider::before { left: 0; }
+    .divider::after { right: 0; }
     .footer-text {
       text-align: center; margin-top: 2rem; font-size: 0.6875rem; color: #3f3f46;
       display: flex; align-items: center; justify-content: center; gap: 0.375rem;
@@ -484,14 +560,23 @@ function loginPageHTML(error) {
     <h1>Welcome to OpenClaw</h1>
     <p class="subtitle">Sign in to manage your instance</p>
     ${errorBlock}
-    ${notConfigured}
-    <a href="/auth/github" class="${btnCls}" ${btnDisabled}>
+    <form method="POST" action="/auth/password" class="password-form">
+      <label class="form-label" for="password">Setup Password</label>
+      <input id="password" name="password" type="password" class="form-input" placeholder="Enter setup password" autocomplete="current-password" required autofocus />
+      <button type="submit" class="btn btn-primary">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+        Sign in with Password
+      </button>
+    </form>
+    ${divider}
+    <a href="/auth/github" class="btn ${btnCls}" ${btnDisabled}>
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
       Continue with GitHub
     </a>
+    ${notConfigured}
     <p class="footer-text">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-      Secured by GitHub OAuth
+      Protected by ${oauthConfigured ? "password & GitHub OAuth" : "setup password"}
     </p>
   </div>
 </body>
@@ -500,8 +585,8 @@ function loginPageHTML(error) {
 
 app.get("/auth/login", (req, res) => {
   // If already logged in, redirect to home
-  if (req.session?.user) {
-    return res.redirect("/");
+  if (req.session?.user || req.session?.passwordAuth) {
+    return res.redirect("/setup");
   }
   const error = req.query.error || "";
   res.type("html").send(loginPageHTML(error));
@@ -587,11 +672,47 @@ app.get("/auth/logout", (req, res) => {
   });
 });
 
+app.post("/auth/password", express.urlencoded({ extended: true }), (req, res) => {
+  const { password } = req.body;
+  
+  if (!password) {
+    return res.redirect("/auth/login?error=" + encodeURIComponent("Password is required."));
+  }
+
+  // Use timing-safe comparison to prevent timing attacks
+  const providedPassword = Buffer.from(password, "utf-8");
+  const expectedPassword = Buffer.from(SETUP_PASSWORD, "utf-8");
+  
+  if (providedPassword.length !== expectedPassword.length) {
+    return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid password."));
+  }
+
+  let match = true;
+  for (let i = 0; i < providedPassword.length; i++) {
+    if (providedPassword[i] !== expectedPassword[i]) {
+      match = false;
+    }
+  }
+
+  if (!match) {
+    return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid password."));
+  }
+
+  // Password is correct, set session
+  req.session.passwordAuth = true;
+  req.session.save(() => {
+    res.redirect("/setup");
+  });
+});
+
 app.get("/auth/me", (req, res) => {
-  if (!req.session?.user) {
+  if (!req.session?.user && !req.session?.passwordAuth) {
     return res.status(401).json({ error: "Not authenticated" });
   }
-  res.json({ user: req.session.user });
+  res.json({ 
+    user: req.session.user || null,
+    passwordAuth: req.session.passwordAuth || false
+  });
 });
 
 function getBaseUrl(req) {
