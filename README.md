@@ -75,7 +75,9 @@ If you forget your password:
 
 **Alternative:** If email is not configured, you can manually reset by deleting the password hash file from Railway's volume using Railway CLI:
 ```bash
-railway run rm /data/.openclaw/setup.password.hash
+railway shell
+rm /data/.openclaw/setup.password.hash
+exit
 ```
 
 ### Email Configuration for Password Reset

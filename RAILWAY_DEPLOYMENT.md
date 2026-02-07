@@ -135,8 +135,14 @@ railway login
 # Link to your project
 railway link
 
+# Open a shell in your Railway environment
+railway shell
+
 # Remove the password hash file
-railway run rm /data/.openclaw/setup.password.hash
+rm /data/.openclaw/setup.password.hash
+
+# Exit the shell
+exit
 
 # Next visit to /setup will prompt you to create a new password
 ```

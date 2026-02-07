@@ -1516,12 +1516,12 @@ app.post("/setup/forgot-password", express.urlencoded({ extended: false }), asyn
     const resetLink = `${getBaseUrl(req)}/setup/reset-password?token=${token}`;
     await sendResetEmail(resetLink);
     
-    // Redirect with success message (don't reveal if email was sent or not for security)
-    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If an admin email is configured, a reset link has been sent."));
+    // Redirect with success message (generic message for security)
+    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
   } catch (err) {
     console.error("[reset] Failed to send reset email:", err);
-    // Don't reveal error details for security
-    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If an admin email is configured, a reset link has been sent."));
+    // Don't reveal error details for security - use same message
+    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
   }
 });
 
@@ -1543,6 +1543,11 @@ app.get("/setup/reset-password", (req, res) => {
     }
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent(errorMsg));
   }
+
+  const error = req.query.error || "";
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
 
   res.type("html").send(`<!doctype html>
 <html lang="en">
@@ -1674,6 +1679,7 @@ app.get("/setup/reset-password", (req, res) => {
   <div class="container">
     <h1>🔑 Reset Password</h1>
     <p class="subtitle">Choose a new password for your setup panel</p>
+    ${errorBlock}
     <form method="POST" action="/setup/reset-password" id="resetForm">
       <input type="hidden" name="token" value="${escapeHtml(token)}" />
       
@@ -1796,7 +1802,7 @@ app.post("/setup/reset-password", express.urlencoded({ extended: false }), async
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent(errorMsg));
   }
   
-  // Validate password
+  // Validate password - instead of redirecting with token in URL, re-render the page with error
   if (!password || !confirmPassword) {
     return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Both fields are required"));
   }
@@ -1824,7 +1830,8 @@ app.post("/setup/reset-password", express.urlencoded({ extended: false }), async
     res.redirect("/setup/password-prompt?success=" + encodeURIComponent("Password reset successfully. Please sign in with your new password."));
   } catch (err) {
     console.error("[reset] Failed to reset password:", err);
-    res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Failed to reset password. Please try again."));
+    // Re-render with error instead of redirecting with token in URL
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Failed to reset password. Please try again."));
   }
 });
 
