@@ -873,6 +873,11 @@ app.post("/setup/save-password", express.urlencoded({ extended: false }), (req, 
 
 // --- Normal password login ---
 app.get("/setup/password-prompt", (req, res) => {
+  // If no password configured yet, redirect to creation flow
+  if (!isPasswordConfigured()) {
+    return res.redirect("/setup/create-password");
+  }
+
   const error = req.query.error || "";
   const errorBlock = error
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
@@ -1034,6 +1039,11 @@ function rateLimitPassword(req, res, next) {
 }
 
 app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ extended: false }), (req, res) => {
+  // If no password configured yet, redirect to creation flow
+  if (!isPasswordConfigured()) {
+    return res.redirect("/setup/create-password");
+  }
+
   const submittedPassword = req.body.password || "";
   
   // Use timing-safe comparison to prevent timing attacks
