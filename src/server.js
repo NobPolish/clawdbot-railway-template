@@ -42,6 +42,43 @@ const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || "")
   .map((u) => u.trim().toLowerCase())
   .filter(Boolean);
 
+// SETUP_PASSWORD configuration.
+// Auto-generate a secure password if not provided.
+function resolveSetupPassword() {
+  const envPassword = process.env.SETUP_PASSWORD?.trim();
+  if (envPassword) return envPassword;
+
+  const passwordPath = path.join(STATE_DIR, "setup.password");
+  try {
+    const existing = fs.readFileSync(passwordPath, "utf8").trim();
+    if (existing) return existing;
+  } catch {
+    // First run - generate new password
+  }
+
+  const generated = crypto.randomBytes(32).toString("base64").replace(/[/+=]/g, "").slice(0, 32);
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(passwordPath, generated, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // best-effort
+  }
+  
+  console.log("\n" + "=".repeat(80));
+  console.log("⚠️  SETUP_PASSWORD was not configured!");
+  console.log("Auto-generated password for /setup access:");
+  console.log("");
+  console.log(`    ${generated}`);
+  console.log("");
+  console.log("This password has been saved to:", passwordPath);
+  console.log("Set SETUP_PASSWORD environment variable to use a custom password.");
+  console.log("=".repeat(80) + "\n");
+  
+  return generated;
+}
+
+const SETUP_PASSWORD = resolveSetupPassword();
+
 // Session secret: reuse a persisted value for stability across restarts.
 function resolveSessionSecret() {
   const envSecret = process.env.SESSION_SECRET?.trim();
@@ -338,6 +375,32 @@ function isAuthConfigured() {
   return Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET);
 }
 
+// ---------- SETUP_PASSWORD authentication ----------
+
+function requireSetupPassword(req, res, next) {
+  // Exclude public routes
+  if (
+    req.path === "/setup/password-prompt" ||
+    req.path === "/setup/verify-password" ||
+    req.path === "/setup/healthz"
+  ) {
+    return next();
+  }
+
+  // Check if password has been verified in session
+  if (req.session?.setupPasswordVerified) {
+    return next();
+  }
+
+  // For API calls, return 401
+  if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+    return res.status(401).json({ error: "Setup password required" });
+  }
+
+  // For page requests, redirect to password prompt
+  return res.redirect("/setup/password-prompt");
+}
+
 function requireAuth(req, res, next) {
   // Auth routes and healthcheck are always public
   if (
@@ -599,6 +662,172 @@ function getBaseUrl(req) {
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}`;
 }
+
+// ---------- SETUP_PASSWORD routes ----------
+
+app.get("/setup/password-prompt", (req, res) => {
+  const error = req.query.error || "";
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Setup Password Required</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --surface-2: #1c1c21;
+      --border: #232329;
+      --text: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --error: #ef4444;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 420px;
+      width: 100%;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+    .subtitle {
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+    }
+    .alert {
+      padding: 0.875rem;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+    .alert-error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+    }
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 1rem;
+      font-family: inherit;
+      margin-bottom: 1.5rem;
+      transition: border-color 0.2s;
+    }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: inherit;
+    }
+    button:hover {
+      background: var(--primary-hover);
+    }
+    button:active {
+      transform: scale(0.98);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔐 Setup Password</h1>
+    <p class="subtitle">Enter the password to access the setup panel</p>
+    ${errorBlock}
+    <form method="POST" action="/setup/verify-password">
+      <label for="password">Password</label>
+      <input 
+        type="password" 
+        id="password" 
+        name="password" 
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        required 
+        autofocus 
+      />
+      <button type="submit">Continue</button>
+    </form>
+  </div>
+</body>
+</html>`);
+});
+
+app.post("/setup/verify-password", express.urlencoded({ extended: false }), (req, res) => {
+  const submittedPassword = req.body.password || "";
+  
+  // Use timing-safe comparison to prevent timing attacks
+  const passwordBuffer = Buffer.from(submittedPassword);
+  const expectedBuffer = Buffer.from(SETUP_PASSWORD);
+  
+  // Ensure buffers are the same length before comparison
+  if (passwordBuffer.length !== expectedBuffer.length) {
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Incorrect password"));
+  }
+  
+  try {
+    if (crypto.timingSafeEqual(passwordBuffer, expectedBuffer)) {
+      req.session.setupPasswordVerified = true;
+      req.session.save(() => {
+        res.redirect("/setup");
+      });
+    } else {
+      res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Incorrect password"));
+    }
+  } catch (err) {
+    console.error("[setup] Password verification error:", err);
+    res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Incorrect password"));
+  }
+});
+
+// Apply SETUP_PASSWORD auth to /setup routes (before GitHub OAuth)
+app.use("/setup", requireSetupPassword);
 
 // Apply auth to all routes below
 app.use(requireAuth);
