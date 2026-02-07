@@ -139,6 +139,15 @@ This template makes it easy to migrate from Docker/Docker Compose to Railway:
 
 For detailed migration guide, see [RAILWAY_DEPLOYMENT.md](./RAILWAY_DEPLOYMENT.md#migration-from-docker-compose).
 
+## Build and Development
+
+For comprehensive information about building, testing, and developing this project, see [BUILD.md](./BUILD.md). This includes:
+- Local development setup
+- Docker build instructions
+- CI/CD pipeline details
+- Security considerations
+- Troubleshooting guide
+
 ---
 
 ## Official template / endorsements
