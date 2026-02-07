@@ -80,7 +80,18 @@ All password-related endpoints have rate limiting:
 - bcrypt itself is well-maintained and secure
 - Monitor for bcrypt updates that use newer tar versions
 
-### 3. Email Relay Security
+### 3. nodemailer Security
+**Status:** Patched ✅
+
+**Version:** 7.0.7 (patched)
+
+**Previous vulnerability:** Email to an unintended domain could occur due to Interpretation Conflict (CVE in versions < 7.0.7)
+
+**Resolution:**
+- Updated from 6.9.15 to 7.0.7
+- Vulnerability fixed in patched version
+
+### 4. Email Relay Security
 **Status:** User-configurable
 
 **Consideration:** SMTP credentials must be secured
