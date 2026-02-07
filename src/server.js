@@ -1044,7 +1044,7 @@ app.get("/setup/create-password", (req, res) => {
 });
 
 // Handle password creation
-app.post("/setup/create-password", express.urlencoded({ extended: false }), async (req, res) => {
+app.post("/setup/create-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
   // If password is already set, don't allow creating a new one this way
   if (isPasswordSet()) {
     return res.redirect("/setup/password-prompt");
@@ -1298,7 +1298,7 @@ app.get("/setup/password-prompt", (req, res) => {
 </html>`);
 });
 
-// Simple rate limiter for password verification (prevent brute force)
+// Simple rate limiter for password operations (prevent brute force)
 const passwordAttempts = new Map();
 const MAX_ATTEMPTS = 5;
 const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
@@ -1317,6 +1317,11 @@ function rateLimitPassword(req, res, next) {
   passwordAttempts.set(clientId, recentAttempts);
   
   if (recentAttempts.length >= MAX_ATTEMPTS) {
+    // For GET requests, redirect with error
+    if (req.method === 'GET' || req.method === 'get') {
+      return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
+    }
+    // For POST requests, redirect with error
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
   }
   
@@ -1496,7 +1501,7 @@ app.get("/setup/forgot-password", (req, res) => {
 });
 
 // Handle forgot password submission
-app.post("/setup/forgot-password", express.urlencoded({ extended: false }), async (req, res) => {
+app.post("/setup/forgot-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
   const emailConfigured = Boolean(ADMIN_EMAIL && SMTP_HOST && SMTP_USER && SMTP_PASS);
   
   if (!emailConfigured) {
@@ -1784,7 +1789,7 @@ app.get("/setup/reset-password", (req, res) => {
 });
 
 // Handle reset password submission
-app.post("/setup/reset-password", express.urlencoded({ extended: false }), async (req, res) => {
+app.post("/setup/reset-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
   const { token, password, confirmPassword } = req.body;
   
   if (!token) {
