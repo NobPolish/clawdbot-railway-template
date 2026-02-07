@@ -4,9 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import bcrypt from "bcrypt";
 import express from "express";
 import session from "express-session";
 import httpProxy from "http-proxy";
+import nodemailer from "nodemailer";
 import * as tar from "tar";
 
 // Railway deployments sometimes inject PORT=3000 by default. We want the wrapper to
@@ -41,6 +43,13 @@ const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || "")
   .split(",")
   .map((u) => u.trim().toLowerCase())
   .filter(Boolean);
+
+// Email configuration for password reset
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL?.trim() || "";
+const SMTP_HOST = process.env.SMTP_HOST?.trim() || "";
+const SMTP_PORT = Number.parseInt(process.env.SMTP_PORT || "587", 10);
+const SMTP_USER = process.env.SMTP_USER?.trim() || "";
+const SMTP_PASS = process.env.SMTP_PASS?.trim() || "";
 
 // Session secret: reuse a persisted value for stability across restarts.
 function resolveSessionSecret() {
@@ -124,6 +133,93 @@ function isConfigured() {
     return false;
   }
 }
+
+// Password authentication helpers
+function passwordHashPath() {
+  return path.join(STATE_DIR, "setup.password.hash");
+}
+
+function isPasswordSet() {
+  try {
+    return fs.existsSync(passwordHashPath());
+  } catch {
+    return false;
+  }
+}
+
+function resetTokenPath() {
+  return path.join(STATE_DIR, "reset.token");
+}
+
+function generateResetToken() {
+  const token = crypto.randomBytes(32).toString("hex");
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  return { token, hash };
+}
+
+function saveResetToken(hash) {
+  try {
+    const expiry = Date.now() + 60 * 60 * 1000; // 1 hour
+    const data = JSON.stringify({ hash, expiry });
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(resetTokenPath(), data, { encoding: "utf8", mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function verifyResetToken(token) {
+  try {
+    const data = JSON.parse(fs.readFileSync(resetTokenPath(), "utf8"));
+    const hash = crypto.createHash("sha256").update(token).digest("hex");
+    
+    if (data.hash !== hash) {
+      return { valid: false, reason: "invalid" };
+    }
+    
+    if (Date.now() > data.expiry) {
+      return { valid: false, reason: "expired" };
+    }
+    
+    return { valid: true };
+  } catch {
+    return { valid: false, reason: "invalid" };
+  }
+}
+
+function invalidateResetToken() {
+  try {
+    fs.unlinkSync(resetTokenPath());
+  } catch {
+    // ignore
+  }
+}
+
+async function sendResetEmail(resetLink) {
+  if (!ADMIN_EMAIL || !SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    throw new Error("Email not configured");
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS,
+    },
+  });
+
+  await transporter.sendMail({
+    from: SMTP_USER,
+    to: ADMIN_EMAIL,
+    subject: "OpenClaw Setup - Password Reset",
+    text: `You requested a password reset for your OpenClaw setup panel.\n\nClick here to reset your password:\n${resetLink}\n\nThis link expires in 1 hour.\n\nIf you didn't request this, please ignore this email.`,
+    html: `<p>You requested a password reset for your OpenClaw setup panel.</p><p><a href="${resetLink}">Click here to reset your password</a></p><p>This link expires in 1 hour.</p><p>If you didn't request this, please ignore this email.</p>`,
+  });
+}
+
 
 let gatewayProc = null;
 let gatewayStarting = null;
@@ -400,33 +496,62 @@ function isAuthConfigured() {
 }
 
 function requireAuth(req, res, next) {
-  // Auth routes and healthcheck are always public
+  // Auth routes, password routes, and healthcheck are always public
   if (
     req.path === "/auth/github" ||
     req.path === "/auth/github/callback" ||
     req.path === "/auth/login" ||
-    req.path === "/setup/healthz"
+    req.path === "/setup/healthz" ||
+    req.path === "/setup/create-password" ||
+    req.path === "/setup/password-prompt" ||
+    req.path === "/setup/verify-password" ||
+    req.path === "/setup/forgot-password" ||
+    req.path === "/setup/reset-password"
   ) {
     return next();
   }
 
-  // If GitHub OAuth is not configured, fall through (allow access).
-  // This lets users still complete initial setup before configuring OAuth.
-  if (!isAuthConfigured()) {
-    return next();
-  }
-
+  // Check if user is authenticated via GitHub OAuth
   if (req.session?.user) {
     return next();
   }
 
-  // For API calls, return 401
-  if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
-    return res.status(401).json({ error: "Not authenticated" });
+  // Check if user is authenticated via password
+  if (req.session?.setupPasswordVerified) {
+    return next();
   }
 
-  // For page requests, redirect to login
-  return res.redirect("/auth/login");
+  // If password is set, redirect to password prompt
+  if (isPasswordSet()) {
+    // For API calls, return 401
+    if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    // For page requests, redirect to password prompt
+    return res.redirect("/setup/password-prompt");
+  }
+
+  // If GitHub OAuth is not configured and password is not set, redirect to password creation
+  if (!isAuthConfigured() && !isPasswordSet()) {
+    // Allow access to setup to create password
+    if (req.path.startsWith("/setup")) {
+      // Redirect to password creation page
+      return res.redirect("/setup/create-password");
+    }
+  }
+
+  // If GitHub OAuth is configured but user not authenticated
+  if (isAuthConfigured()) {
+    // For API calls, return 401
+    if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    // For page requests, redirect to login
+    return res.redirect("/auth/login");
+  }
+
+  // Fallback: allow access (for initial setup)
+  return next();
 }
 
 // ---------- Express app ----------
@@ -660,6 +785,1085 @@ function getBaseUrl(req) {
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}`;
 }
+
+// ---------- Password authentication routes ----------
+
+// Password creation page
+app.get("/setup/create-password", (req, res) => {
+  // If password is already set, redirect to password prompt
+  if (isPasswordSet()) {
+    return res.redirect("/setup/password-prompt");
+  }
+
+  const error = req.query.error || "";
+  const success = req.query.success || "";
+  
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
+  
+  const successBlock = success
+    ? `<div class="alert alert-success">${escapeHtml(success)}</div>`
+    : "";
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Create Password - Setup Panel</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --surface-2: #1c1c21;
+      --border: #232329;
+      --text: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --error: #ef4444;
+      --success: #22c55e;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 480px;
+      width: 100%;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+    .subtitle {
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .alert {
+      padding: 0.875rem;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+    .alert-error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+    }
+    .alert-success {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      color: #86efac;
+    }
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 1rem;
+      font-family: inherit;
+      margin-bottom: 1.5rem;
+      transition: border-color 0.2s;
+    }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    input[type="password"].error {
+      border-color: var(--error);
+    }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: inherit;
+    }
+    button:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    button:active:not(:disabled) {
+      transform: scale(0.98);
+    }
+    .hint {
+      font-size: 0.8125rem;
+      color: var(--text-dim);
+      margin-top: -1rem;
+      margin-bottom: 1.5rem;
+    }
+    .validation-msg {
+      font-size: 0.8125rem;
+      margin-top: -1rem;
+      margin-bottom: 1rem;
+      padding: 0.5rem;
+      border-radius: 6px;
+      display: none;
+    }
+    .validation-msg.show {
+      display: block;
+    }
+    .validation-msg.error {
+      background: rgba(239, 68, 68, 0.1);
+      color: #fca5a5;
+    }
+    .validation-msg.success {
+      background: rgba(34, 197, 94, 0.1);
+      color: #86efac;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔐 Create Password</h1>
+    <p class="subtitle">Set a password to protect your setup panel.</p>
+    ${errorBlock}${successBlock}
+    <form method="POST" action="/setup/create-password" id="createForm">
+      <label for="password">New Password</label>
+      <input 
+        type="password" 
+        id="password" 
+        name="password" 
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        minlength="8"
+        required 
+        autofocus 
+      />
+      <p class="hint">Minimum 8 characters</p>
+      
+      <label for="confirmPassword">Confirm Password</label>
+      <input 
+        type="password" 
+        id="confirmPassword" 
+        name="confirmPassword" 
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        minlength="8"
+        required 
+      />
+      
+      <div id="validationMsg" class="validation-msg"></div>
+      
+      <button type="submit" id="submitBtn">Set Password</button>
+    </form>
+  </div>
+  
+  <script>
+    const form = document.getElementById('createForm');
+    const password = document.getElementById('password');
+    const confirmPassword = document.getElementById('confirmPassword');
+    const validationMsg = document.getElementById('validationMsg');
+    const submitBtn = document.getElementById('submitBtn');
+    
+    function validatePasswords() {
+      const pwd = password.value;
+      const confirm = confirmPassword.value;
+      
+      // Clear previous validation
+      validationMsg.classList.remove('show', 'error', 'success');
+      password.classList.remove('error');
+      confirmPassword.classList.remove('error');
+      submitBtn.disabled = false;
+      
+      if (pwd.length === 0 && confirm.length === 0) {
+        return;
+      }
+      
+      if (pwd.length > 0 && pwd.length < 8) {
+        validationMsg.textContent = 'Password must be at least 8 characters';
+        validationMsg.classList.add('show', 'error');
+        password.classList.add('error');
+        submitBtn.disabled = true;
+        return;
+      }
+      
+      if (confirm.length > 0 && pwd !== confirm) {
+        validationMsg.textContent = 'Passwords do not match';
+        validationMsg.classList.add('show', 'error');
+        confirmPassword.classList.add('error');
+        submitBtn.disabled = true;
+        return;
+      }
+      
+      if (pwd.length >= 8 && pwd === confirm && confirm.length > 0) {
+        validationMsg.textContent = 'Passwords match ✓';
+        validationMsg.classList.add('show', 'success');
+      }
+    }
+    
+    password.addEventListener('input', validatePasswords);
+    confirmPassword.addEventListener('input', validatePasswords);
+    
+    form.addEventListener('submit', (e) => {
+      const pwd = password.value;
+      const confirm = confirmPassword.value;
+      
+      if (pwd.length < 8) {
+        e.preventDefault();
+        alert('Password must be at least 8 characters');
+        return;
+      }
+      
+      if (pwd !== confirm) {
+        e.preventDefault();
+        alert('Passwords do not match');
+        return;
+      }
+    });
+  </script>
+</body>
+</html>`);
+});
+
+// Simple rate limiter for password operations (prevent brute force)
+const passwordAttempts = new Map();
+const MAX_ATTEMPTS = 5;
+const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+
+function rateLimitPassword(req, res, next) {
+  const clientId = req.ip || req.connection.remoteAddress || "unknown";
+  const now = Date.now();
+  
+  if (!passwordAttempts.has(clientId)) {
+    passwordAttempts.set(clientId, []);
+  }
+  
+  const attempts = passwordAttempts.get(clientId);
+  // Remove old attempts outside the window
+  const recentAttempts = attempts.filter(time => now - time < ATTEMPT_WINDOW);
+  passwordAttempts.set(clientId, recentAttempts);
+  
+  if (recentAttempts.length >= MAX_ATTEMPTS) {
+    // For GET requests, redirect with error
+    if (req.method === 'GET' || req.method === 'get') {
+      return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
+    }
+    // For POST requests, redirect with error
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
+  }
+  
+  // Record this attempt
+  recentAttempts.push(now);
+  next();
+}
+
+// Handle password creation
+app.post("/setup/create-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
+  // If password is already set, don't allow creating a new one this way
+  if (isPasswordSet()) {
+    return res.redirect("/setup/password-prompt");
+  }
+
+  const { password, confirmPassword } = req.body;
+
+  // Validate
+  if (!password || !confirmPassword) {
+    return res.redirect("/setup/create-password?error=" + encodeURIComponent("Both fields are required"));
+  }
+
+  if (password.length < 8) {
+    return res.redirect("/setup/create-password?error=" + encodeURIComponent("Password must be at least 8 characters"));
+  }
+
+  if (password !== confirmPassword) {
+    return res.redirect("/setup/create-password?error=" + encodeURIComponent("Passwords do not match"));
+  }
+
+  try {
+    // Hash password with bcrypt (cost factor 12)
+    const hash = await bcrypt.hash(password, 12);
+    
+    // Save to file with secure permissions
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(passwordHashPath(), hash, { encoding: "utf8", mode: 0o600 });
+    
+    // Immediately authenticate the user
+    req.session.setupPasswordVerified = true;
+    
+    req.session.save(() => {
+      res.redirect("/setup");
+    });
+  } catch (err) {
+    console.error("[setup] Failed to create password:", err);
+    res.redirect("/setup/create-password?error=" + encodeURIComponent("Failed to create password. Please try again."));
+  }
+});
+
+// Password prompt (sign in) page
+app.get("/setup/password-prompt", (req, res) => {
+  const error = req.query.error || "";
+  const success = req.query.success || "";
+  
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
+  
+  const successBlock = success
+    ? `<div class="alert alert-success">${escapeHtml(success)}</div>`
+    : "";
+  
+  const githubEnabled = isAuthConfigured();
+  const githubSection = githubEnabled ? `
+    <div class="divider">
+      <span>or</span>
+    </div>
+    <a href="/auth/github" class="btn-github">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      Continue with GitHub
+    </a>
+  ` : '';
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign In - Setup Panel</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --surface-2: #1c1c21;
+      --border: #232329;
+      --text: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --error: #ef4444;
+      --success: #22c55e;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 420px;
+      width: 100%;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+    .subtitle {
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+    }
+    .alert {
+      padding: 0.875rem;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+    .alert-error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+    }
+    .alert-success {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      color: #86efac;
+    }
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 1rem;
+      font-family: inherit;
+      margin-bottom: 0.75rem;
+      transition: border-color 0.2s;
+    }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: inherit;
+    }
+    button:hover {
+      background: var(--primary-hover);
+    }
+    button:active {
+      transform: scale(0.98);
+    }
+    .forgot-link {
+      display: block;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.875rem;
+      text-decoration: none;
+      margin-top: 1rem;
+      transition: color 0.2s;
+    }
+    .forgot-link:hover {
+      color: var(--primary);
+    }
+    .divider {
+      display: flex;
+      align-items: center;
+      margin: 1.5rem 0;
+      color: var(--text-dim);
+      font-size: 0.875rem;
+    }
+    .divider::before,
+    .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+    .divider span {
+      padding: 0 1rem;
+    }
+    .btn-github {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-decoration: none;
+    }
+    .btn-github:hover {
+      background: var(--surface);
+      border-color: var(--primary);
+    }
+    .btn-github svg {
+      width: 20px;
+      height: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔐 Sign In</h1>
+    <p class="subtitle">Enter your password to access the setup panel</p>
+    ${errorBlock}${successBlock}
+    <form method="POST" action="/setup/verify-password">
+      <label for="password">Password</label>
+      <input 
+        type="password" 
+        id="password" 
+        name="password" 
+        autocomplete="current-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        required 
+        autofocus 
+      />
+      <button type="submit">Sign In</button>
+    </form>
+    <a href="/setup/forgot-password" class="forgot-link">Forgot Password?</a>
+    ${githubSection}
+  </div>
+</body>
+</html>`);
+});
+
+// Verify password
+app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
+  const submittedPassword = req.body.password || "";
+  
+  try {
+    // Read the password hash from file
+    const hash = fs.readFileSync(passwordHashPath(), "utf8").trim();
+    
+    // Use bcrypt to compare (timing-safe by default)
+    const isValid = await bcrypt.compare(submittedPassword, hash);
+    
+    if (isValid) {
+      req.session.setupPasswordVerified = true;
+      req.session.save(() => {
+        res.redirect("/setup");
+      });
+    } else {
+      res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Incorrect password"));
+    }
+  } catch (err) {
+    console.error("[setup] Password verification error:", err);
+    res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Incorrect password"));
+  }
+});
+
+// Forgot password page
+app.get("/setup/forgot-password", (req, res) => {
+  const emailConfigured = Boolean(ADMIN_EMAIL && SMTP_HOST && SMTP_USER && SMTP_PASS);
+  
+  const helpText = !emailConfigured ? `
+    <div class="alert alert-info">
+      <strong>Email not configured</strong><br>
+      To use password reset, configure these environment variables in Railway:
+      <ul style="margin-top: 0.5rem; padding-left: 1.5rem;">
+        <li><code>ADMIN_EMAIL</code> - Your email address</li>
+        <li><code>SMTP_HOST</code> - SMTP server (e.g., smtp.gmail.com)</li>
+        <li><code>SMTP_PORT</code> - Usually 587</li>
+        <li><code>SMTP_USER</code> - SMTP username</li>
+        <li><code>SMTP_PASS</code> - SMTP password or app password</li>
+      </ul>
+      <p style="margin-top: 0.75rem;">
+        <strong>Alternative:</strong> If you have Railway CLI access, you can manually reset by deleting the password hash file from the state directory.
+      </p>
+    </div>
+  ` : '';
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Forgot Password</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --surface-2: #1c1c21;
+      --border: #232329;
+      --text: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --info: #0ea5e9;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 520px;
+      width: 100%;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+    .subtitle {
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .alert {
+      padding: 1rem;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      line-height: 1.6;
+    }
+    .alert-info {
+      background: rgba(14, 165, 233, 0.1);
+      border: 1px solid rgba(14, 165, 233, 0.3);
+      color: #7dd3fc;
+    }
+    .alert ul {
+      list-style: disc;
+    }
+    .alert code {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 0.125rem 0.375rem;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 0.8125rem;
+    }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: inherit;
+      margin-bottom: 1rem;
+    }
+    button:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    button:active:not(:disabled) {
+      transform: scale(0.98);
+    }
+    .back-link {
+      display: block;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.875rem;
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .back-link:hover {
+      color: var(--primary);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔑 Forgot Password</h1>
+    <p class="subtitle">Request a password reset link via email</p>
+    ${helpText}
+    <form method="POST" action="/setup/forgot-password">
+      <button type="submit" ${!emailConfigured ? 'disabled' : ''}>
+        ${emailConfigured ? 'Send Reset Link' : 'Email Not Configured'}
+      </button>
+    </form>
+    <a href="/setup/password-prompt" class="back-link">← Back to Sign In</a>
+  </div>
+</body>
+</html>`);
+});
+
+// Handle forgot password submission
+app.post("/setup/forgot-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
+  const emailConfigured = Boolean(ADMIN_EMAIL && SMTP_HOST && SMTP_USER && SMTP_PASS);
+  
+  if (!emailConfigured) {
+    return res.redirect("/setup/forgot-password");
+  }
+
+  try {
+    // Generate reset token
+    const { token, hash } = generateResetToken();
+    
+    // Save token hash with expiry
+    if (!saveResetToken(hash)) {
+      throw new Error("Failed to save reset token");
+    }
+    
+    // Send email
+    const resetLink = `${getBaseUrl(req)}/setup/reset-password?token=${token}`;
+    await sendResetEmail(resetLink);
+    
+    // Redirect with success message (generic message for security)
+    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
+  } catch (err) {
+    console.error("[reset] Failed to send reset email:", err);
+    // Don't reveal error details for security - use same message
+    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
+  }
+});
+
+// Reset password page
+app.get("/setup/reset-password", (req, res) => {
+  const token = req.query.token || "";
+  
+  if (!token) {
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Invalid reset link"));
+  }
+  
+  // Verify token
+  const verification = verifyResetToken(token);
+  
+  if (!verification.valid) {
+    let errorMsg = "Invalid or expired reset link";
+    if (verification.reason === "expired") {
+      errorMsg = "Reset link has expired. Please request a new one.";
+    }
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent(errorMsg));
+  }
+
+  const error = req.query.error || "";
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reset Password</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --surface-2: #1c1c21;
+      --border: #232329;
+      --text: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --error: #ef4444;
+      --success: #22c55e;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 480px;
+      width: 100%;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+    .subtitle {
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .alert {
+      padding: 0.875rem;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+    .alert-error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+    }
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 1rem;
+      font-family: inherit;
+      margin-bottom: 1.5rem;
+      transition: border-color 0.2s;
+    }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    input[type="password"].error {
+      border-color: var(--error);
+    }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: inherit;
+    }
+    button:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    button:active:not(:disabled) {
+      transform: scale(0.98);
+    }
+    .hint {
+      font-size: 0.8125rem;
+      color: var(--text-dim);
+      margin-top: -1rem;
+      margin-bottom: 1.5rem;
+    }
+    .validation-msg {
+      font-size: 0.8125rem;
+      margin-top: -1rem;
+      margin-bottom: 1rem;
+      padding: 0.5rem;
+      border-radius: 6px;
+      display: none;
+    }
+    .validation-msg.show {
+      display: block;
+    }
+    .validation-msg.error {
+      background: rgba(239, 68, 68, 0.1);
+      color: #fca5a5;
+    }
+    .validation-msg.success {
+      background: rgba(34, 197, 94, 0.1);
+      color: #86efac;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔑 Reset Password</h1>
+    <p class="subtitle">Choose a new password for your setup panel</p>
+    ${errorBlock}
+    <form method="POST" action="/setup/reset-password" id="resetForm">
+      <input type="hidden" name="token" value="${escapeHtml(token)}" />
+      
+      <label for="password">New Password</label>
+      <input 
+        type="password" 
+        id="password" 
+        name="password" 
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        minlength="8"
+        required 
+        autofocus 
+      />
+      <p class="hint">Minimum 8 characters</p>
+      
+      <label for="confirmPassword">Confirm Password</label>
+      <input 
+        type="password" 
+        id="confirmPassword" 
+        name="confirmPassword" 
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        minlength="8"
+        required 
+      />
+      
+      <div id="validationMsg" class="validation-msg"></div>
+      
+      <button type="submit" id="submitBtn">Reset Password</button>
+    </form>
+  </div>
+  
+  <script>
+    const form = document.getElementById('resetForm');
+    const password = document.getElementById('password');
+    const confirmPassword = document.getElementById('confirmPassword');
+    const validationMsg = document.getElementById('validationMsg');
+    const submitBtn = document.getElementById('submitBtn');
+    
+    function validatePasswords() {
+      const pwd = password.value;
+      const confirm = confirmPassword.value;
+      
+      validationMsg.classList.remove('show', 'error', 'success');
+      password.classList.remove('error');
+      confirmPassword.classList.remove('error');
+      submitBtn.disabled = false;
+      
+      if (pwd.length === 0 && confirm.length === 0) {
+        return;
+      }
+      
+      if (pwd.length > 0 && pwd.length < 8) {
+        validationMsg.textContent = 'Password must be at least 8 characters';
+        validationMsg.classList.add('show', 'error');
+        password.classList.add('error');
+        submitBtn.disabled = true;
+        return;
+      }
+      
+      if (confirm.length > 0 && pwd !== confirm) {
+        validationMsg.textContent = 'Passwords do not match';
+        validationMsg.classList.add('show', 'error');
+        confirmPassword.classList.add('error');
+        submitBtn.disabled = true;
+        return;
+      }
+      
+      if (pwd.length >= 8 && pwd === confirm && confirm.length > 0) {
+        validationMsg.textContent = 'Passwords match ✓';
+        validationMsg.classList.add('show', 'success');
+      }
+    }
+    
+    password.addEventListener('input', validatePasswords);
+    confirmPassword.addEventListener('input', validatePasswords);
+    
+    form.addEventListener('submit', (e) => {
+      const pwd = password.value;
+      const confirm = confirmPassword.value;
+      
+      if (pwd.length < 8) {
+        e.preventDefault();
+        alert('Password must be at least 8 characters');
+        return;
+      }
+      
+      if (pwd !== confirm) {
+        e.preventDefault();
+        alert('Passwords do not match');
+        return;
+      }
+    });
+  </script>
+</body>
+</html>`);
+});
+
+// Handle reset password submission
+app.post("/setup/reset-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
+  const { token, password, confirmPassword } = req.body;
+  
+  if (!token) {
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Invalid reset link"));
+  }
+  
+  // Verify token
+  const verification = verifyResetToken(token);
+  
+  if (!verification.valid) {
+    let errorMsg = "Invalid or expired reset link";
+    if (verification.reason === "expired") {
+      errorMsg = "Reset link has expired. Please request a new one.";
+    }
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent(errorMsg));
+  }
+  
+  // Validate password - instead of redirecting with token in URL, re-render the page with error
+  if (!password || !confirmPassword) {
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Both fields are required"));
+  }
+  
+  if (password.length < 8) {
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Password must be at least 8 characters"));
+  }
+  
+  if (password !== confirmPassword) {
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Passwords do not match"));
+  }
+  
+  try {
+    // Hash new password with bcrypt (cost factor 12)
+    const hash = await bcrypt.hash(password, 12);
+    
+    // Save to file with secure permissions
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(passwordHashPath(), hash, { encoding: "utf8", mode: 0o600 });
+    
+    // Invalidate the reset token
+    invalidateResetToken();
+    
+    // Redirect to login with success message
+    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("Password reset successfully. Please sign in with your new password."));
+  } catch (err) {
+    console.error("[reset] Failed to reset password:", err);
+    // Re-render with error instead of redirecting with token in URL
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Failed to reset password. Please try again."));
+  }
+});
 
 // Apply auth to all routes below
 app.use(requireAuth);
