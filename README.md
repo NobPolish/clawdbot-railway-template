@@ -16,7 +16,7 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 ## How it works (high level)
 
 - The container runs a wrapper web server.
-- The wrapper protects `/setup` with `SETUP_PASSWORD`.
+- The wrapper protects `/setup` with a password you create on first visit.
 - During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
 - After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
 
@@ -28,21 +28,17 @@ In Railway Template Composer:
 2) Add a **Volume** mounted at `/data`.
 3) Set the following variables:
 
-**⚠️ IMPORTANT: SETUP_PASSWORD Configuration**
-
-The `SETUP_PASSWORD` is **required** to access the `/setup` configuration panel. You have two options:
-
-- **Option 1 (Recommended for Railway)**: Leave `SETUP_PASSWORD` empty in your deployment variables. The system will **auto-generate a secure random password** on first startup and display it in the deployment logs. You can retrieve it from Railway's deployment logs.
-
-- **Option 2**: Set a custom `SETUP_PASSWORD` in Railway variables before deployment (minimum 16 characters recommended).
-
 **Required Variables:**
 - `OPENCLAW_STATE_DIR=/data/.openclaw`
 - `OPENCLAW_WORKSPACE_DIR=/data/workspace`
 
 **Optional Variables:**
-- `SETUP_PASSWORD` — Leave empty for auto-generation (recommended), or set a strong password (16+ characters)
 - `OPENCLAW_GATEWAY_TOKEN` — if not set, the wrapper generates one (not ideal). In a template, set it using a generated secret.
+- `ADMIN_EMAIL` — Your email address (for password reset functionality)
+- `SMTP_HOST` — SMTP server hostname (e.g., smtp.gmail.com)
+- `SMTP_PORT` — SMTP port (default: 587)
+- `SMTP_USER` — SMTP username
+- `SMTP_PASS` — SMTP password or app password
 
 Notes:
 - This template pins OpenClaw to a known-good version by default via Docker build arg `OPENCLAW_GIT_REF`.
@@ -50,12 +46,51 @@ Notes:
 4) Enable **Public Networking** (HTTP). Railway will assign a domain.
 5) Deploy.
 
-Then:
-- Visit `https://<your-app>.up.railway.app/setup`
-- If you used auto-generated password, check Railway deployment logs for the password
-- Enter the password when prompted
-- Complete setup
-- Visit `https://<your-app>.up.railway.app/` and `/openclaw`
+## First-Time Setup
+
+On first visit to your deployment:
+
+1. **Visit** `https://<your-app>.up.railway.app/setup`
+2. **Create Password** — You'll be greeted with a password creation wizard
+   - Enter a secure password (minimum 8 characters)
+   - Confirm your password
+   - Click "Set Password"
+3. **You're in!** — After creating your password, you'll be automatically logged in
+4. **Complete Setup** — Configure your AI provider and bot tokens
+5. **Access OpenClaw** — Visit `https://<your-app>.up.railway.app/` and `/openclaw`
+
+## Password Management
+
+### Signing In
+
+After initial setup, visiting `/setup` will show a sign-in page where you enter your password.
+
+### Forgot Password?
+
+If you forget your password:
+
+1. Click "Forgot Password?" on the sign-in page
+2. If you've configured email settings (`ADMIN_EMAIL` and SMTP), you'll receive a reset link
+3. Click the link in your email to reset your password
+
+**Alternative:** If email is not configured, you can manually reset by deleting the password hash file from Railway's volume using Railway CLI:
+```bash
+railway run rm /data/.openclaw/setup.password.hash
+```
+
+### Email Configuration for Password Reset
+
+To enable password reset via email, configure these environment variables in Railway:
+
+```
+ADMIN_EMAIL=your-email@example.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your-email@gmail.com
+SMTP_PASS=your-app-password
+```
+
+**Gmail Example:** If using Gmail, you'll need to create an [App Password](https://support.google.com/accounts/answer/185833) instead of using your regular password.
 
 ## Getting chat tokens (so you don’t have to scramble)
 
@@ -81,13 +116,12 @@ docker build -t openclaw-railway-template .
 
 docker run --rm -p 8080:8080 \
   -e PORT=8080 \
-  -e SETUP_PASSWORD=test \
   -e OPENCLAW_STATE_DIR=/data/.openclaw \
   -e OPENCLAW_WORKSPACE_DIR=/data/workspace \
   -v $(pwd)/.tmpdata:/data \
   openclaw-railway-template
 
-# open http://localhost:8080/setup (password: test)
+# open http://localhost:8080/setup (you'll create a password on first visit)
 ```
 
 ### Using Docker Compose
@@ -98,8 +132,7 @@ For easier local development and testing, use docker-compose:
 # Copy the example environment file
 cp .env.example .env
 
-# Edit .env and set your SETUP_PASSWORD
-# Then start the container
+# Start the container (you'll create a password on first visit to /setup)
 docker-compose up -d
 
 # View logs
@@ -133,9 +166,9 @@ This template makes it easy to migrate from Docker/Docker Compose to Railway:
 **Migration Steps:**
 1. Deploy this template to Railway (one-click button above)
 2. Add a Railway Volume mounted at `/data`
-3. Set `SETUP_PASSWORD` environment variable
-4. Enable public networking
-5. Access your deployment at the assigned Railway URL
+3. Enable public networking
+4. Access your deployment at the assigned Railway URL
+5. Create your setup password on first visit
 
 For detailed migration guide, see [RAILWAY_DEPLOYMENT.md](./RAILWAY_DEPLOYMENT.md#migration-from-docker-compose).
 
