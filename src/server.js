@@ -49,6 +49,8 @@ function resolveSetupPassword() {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.writeFileSync(passwordPath, generated, { encoding: "utf8", mode: 0o600 });
+    // Ensure correct permissions even if file existed before
+    fs.chmodSync(passwordPath, 0o600);
   } catch {
     // best-effort
   }
@@ -393,8 +395,8 @@ function requireAuth(req, res, next) {
     return next();
   }
 
-  // If neither GitHub OAuth nor password auth is configured, this is an error state
-  // Always require password authentication (SETUP_PASSWORD always exists)
+  // Authentication is required via either GitHub OAuth or SETUP_PASSWORD.
+  // SETUP_PASSWORD always exists (auto-generated if not configured).
   // For API calls, return 401
   if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
     return res.status(401).json({ error: "Not authenticated" });
@@ -562,7 +564,7 @@ function loginPageHTML(error) {
     ${errorBlock}
     <form method="POST" action="/auth/password" class="password-form">
       <label class="form-label" for="password">Setup Password</label>
-      <input id="password" name="password" type="password" class="form-input" placeholder="Enter setup password" autocomplete="current-password" required autofocus />
+      <input id="password" name="password" type="password" class="form-input" placeholder="Enter setup password" autocomplete="off" required autofocus />
       <button type="submit" class="btn btn-primary">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
         Sign in with Password
@@ -679,30 +681,31 @@ app.post("/auth/password", express.urlencoded({ extended: true }), (req, res) =>
     return res.redirect("/auth/login?error=" + encodeURIComponent("Password is required."));
   }
 
-  // Use timing-safe comparison to prevent timing attacks
-  const providedPassword = Buffer.from(password, "utf-8");
-  const expectedPassword = Buffer.from(SETUP_PASSWORD, "utf-8");
-  
-  if (providedPassword.length !== expectedPassword.length) {
-    return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid password."));
-  }
-
-  let match = true;
-  for (let i = 0; i < providedPassword.length; i++) {
-    if (providedPassword[i] !== expectedPassword[i]) {
-      match = false;
+  // Use Node.js's built-in constant-time comparison to prevent timing attacks
+  try {
+    const providedPassword = Buffer.from(password, "utf-8");
+    const expectedPassword = Buffer.from(SETUP_PASSWORD, "utf-8");
+    
+    if (providedPassword.length !== expectedPassword.length) {
+      // Lengths don't match - can't use timingSafeEqual
+      return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid password."));
     }
-  }
 
-  if (!match) {
+    const match = crypto.timingSafeEqual(providedPassword, expectedPassword);
+
+    if (!match) {
+      return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid password."));
+    }
+
+    // Password is correct, set session
+    req.session.passwordAuth = true;
+    req.session.save(() => {
+      res.redirect("/setup");
+    });
+  } catch (err) {
+    // Catch any errors from timingSafeEqual
     return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid password."));
   }
-
-  // Password is correct, set session
-  req.session.passwordAuth = true;
-  req.session.save(() => {
-    res.redirect("/setup");
-  });
 });
 
 app.get("/auth/me", (req, res) => {
