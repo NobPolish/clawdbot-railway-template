@@ -127,6 +127,8 @@ function isConfigured() {
 
 let gatewayProc = null;
 let gatewayStarting = null;
+let gatewayReady = false;
+let gatewayRestartCount = 0;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -144,17 +146,28 @@ async function waitForGatewayReady(opts = {}) {
         : {};
       for (const p of paths) {
         try {
-          const res = await fetch(`${GATEWAY_TARGET}${p}`, { method: "GET", headers });
-          // Any HTTP response means the port is open.
-          if (res) return true;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 3000);
+          const res = await fetch(`${GATEWAY_TARGET}${p}`, {
+            method: "GET",
+            headers,
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
+          // Must be an actual success or redirect — NOT a 401/403 auth rejection.
+          // A 401/403 means the port is open but auth is misconfigured; that is NOT ready.
+          if (res && res.status < 400) return true;
+          if (res && res.status === 401) {
+            console.warn(`[waitForGatewayReady] Got 401 at ${p} — gateway is up but rejecting our token`);
+          }
         } catch {
-          // try next
+          // Connection refused / timeout — not ready yet
         }
       }
     } catch {
       // not ready
     }
-    await sleep(250);
+    await sleep(500);
   }
   return false;
 }
@@ -177,18 +190,22 @@ async function startGateway() {
 
     if (!cfg.gateway) cfg.gateway = {};
 
-    // Ensure gateway auth uses token mode with the wrapper's known token.
-    if (cfg.gateway.authMode !== "token") {
-      cfg.gateway.authMode = "token";
+    // Remove the legacy "authMode" key — OpenClaw rejects it as unrecognized
+    // and crashes on startup if present.
+    if ("authMode" in cfg.gateway) {
+      delete cfg.gateway.authMode;
       dirty = true;
     }
 
-    // Also patch the nested auth object if present (older config format).
-    if (cfg.gateway.auth) {
-      if (cfg.gateway.auth.mode && cfg.gateway.auth.mode !== "token") {
-        cfg.gateway.auth.mode = "token";
-        dirty = true;
-      }
+    // Ensure the nested auth object has mode + token.
+    if (!cfg.gateway.auth) cfg.gateway.auth = {};
+    if (cfg.gateway.auth.mode !== "token") {
+      cfg.gateway.auth.mode = "token";
+      dirty = true;
+    }
+    if (cfg.gateway.auth.token !== OPENCLAW_GATEWAY_TOKEN) {
+      cfg.gateway.auth.token = OPENCLAW_GATEWAY_TOKEN;
+      dirty = true;
     }
 
     // Ensure bind and port are correct.
@@ -203,10 +220,26 @@ async function startGateway() {
 
     if (dirty) {
       fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2), "utf8");
-      console.log("[wrapper] patched gateway config: auth=token, bind=loopback, port=" + INTERNAL_GATEWAY_PORT);
+      console.log("[wrapper] patched gateway config: auth=token, token=(set), bind=loopback, port=" + INTERNAL_GATEWAY_PORT);
     }
   } catch (err) {
     console.warn(`[wrapper] could not patch gateway config: ${err.message}`);
+  }
+
+  // Run doctor --fix to clean up any remaining config schema issues
+  // (e.g. leftover unrecognized keys from older wrapper versions).
+  try {
+    childProcess.spawnSync(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]), {
+      stdio: "inherit",
+      timeout: 15_000,
+      env: {
+        ...process.env,
+        OPENCLAW_STATE_DIR: STATE_DIR,
+        OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+      },
+    });
+  } catch (err) {
+    console.warn(`[wrapper] doctor --fix failed: ${err.message}`);
   }
 
   const args = [
@@ -242,6 +275,26 @@ async function startGateway() {
   gatewayProc.on("exit", (code, signal) => {
     console.error(`[gateway] exited code=${code} signal=${signal}`);
     gatewayProc = null;
+    gatewayReady = false;
+
+    // Auto-restart on unexpected exit (non-zero code or killed by signal).
+    // Use exponential backoff to avoid thrashing.
+    if (code !== 0 || signal) {
+      gatewayRestartCount++;
+      if (gatewayRestartCount <= 8) {
+        const delay = Math.min(2000 * Math.pow(2, gatewayRestartCount - 1), 60000);
+        console.log(`[gateway] auto-restart in ${delay}ms (attempt #${gatewayRestartCount})`);
+        setTimeout(() => {
+          if (!gatewayProc && isConfigured()) {
+            ensureGatewayRunning().catch((err) =>
+              console.error("[gateway] auto-restart failed:", err)
+            );
+          }
+        }, delay);
+      } else {
+        console.error("[gateway] too many consecutive failures \u2014 giving up. Use /setup to restart manually.");
+      }
+    }
   });
 }
 
@@ -251,12 +304,17 @@ async function ensureGatewayRunning() {
   if (gatewayProc) {
     // Fast readiness probe (1s) -- if already running it should respond quickly.
     const alive = await waitForGatewayReady({ timeoutMs: 2_000 });
-    if (alive) return { ok: true };
+    if (alive) {
+      gatewayReady = true;
+      gatewayRestartCount = 0;  // Reset backoff on confirmed health.
+      return { ok: true };
+    }
     // Process object exists but not responding -- kill and restart.
     console.warn("[wrapper] gateway process exists but not responding, restarting...");
     try { gatewayProc.kill("SIGTERM"); } catch { /* ignore */ }
     await sleep(500);
     gatewayProc = null;
+    gatewayReady = false;
   }
   if (!gatewayStarting) {
     gatewayStarting = (async () => {
@@ -271,6 +329,9 @@ async function ensureGatewayRunning() {
         }
         throw new Error("Gateway did not become ready in time");
       }
+      gatewayReady = true;
+      gatewayRestartCount = 0;  // Reset backoff on successful start.
+      console.log("[wrapper] gateway is ready and accepting requests");
     })().finally(() => {
       gatewayStarting = null;
     });
@@ -1341,11 +1402,29 @@ app.post("/setup/api/run", async (req, res) => {
   // Optional channel setup (only after successful onboarding, and only if the installed CLI supports it).
   if (ok) {
     // The internal gateway uses token auth with the wrapper's known token.
-    // OpenClaw 2026.2.4+ rejects "none" as a gateway.auth.mode value.
+    // Only use nested keys (gateway.auth.mode / gateway.auth.token);
+    // the flat "gateway.authMode" key is unrecognized by OpenClaw and crashes the gateway.
+    // Remove legacy authMode key directly from the JSON file
+    // ("config unset" may not be a valid CLI command in all OpenClaw versions).
+    try {
+      const cfgFile = configPath();
+      const cfgRaw = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+      if (cfgRaw.gateway && "authMode" in cfgRaw.gateway) {
+        delete cfgRaw.gateway.authMode;
+        fs.writeFileSync(cfgFile, JSON.stringify(cfgRaw, null, 2), "utf8");
+        console.log("[setup] removed legacy gateway.authMode from config");
+      }
+    } catch (e) {
+      console.warn("[setup] could not clean authMode:", e.message);
+    }
     const cfgOpts = { timeoutMs: 10_000 };
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.authMode", "token"]), cfgOpts);
+    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.mode", "token"]), cfgOpts);
+    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]), cfgOpts);
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.bind", "loopback"]), cfgOpts);
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.port", String(INTERNAL_GATEWAY_PORT)]), cfgOpts);
+
+    // Run doctor --fix to clean up any remaining config issues.
+    await runCmd(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]), cfgOpts).catch(() => {});
 
     // Ensure model is written into config (important for OpenRouter where the CLI may not
     // recognise --model during non-interactive onboarding).
@@ -1753,6 +1832,48 @@ app.post("/setup/import", async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Gateway "starting" splash page.
+// ---------------------------------------------------------------------------
+function sendGatewayStartingPage(res, detail) {
+  const errMsg = escapeHtml(detail || "");
+  return res.status(503).type("html").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Gateway Starting - OpenClaw</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#09090b;color:#fafafa;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.c{max-width:420px;width:100%;padding:1.5rem;text-align:center}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.spinner{width:32px;height:32px;border:3px solid #27272a;border-top-color:#3b82f6;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 1.5rem}
+h1{font-size:1rem;font-weight:600;margin-bottom:0.375rem;animation:fadeUp 0.4s ease both}
+.desc{color:#71717a;font-size:0.8125rem;margin-bottom:1.5rem;line-height:1.5;animation:fadeUp 0.4s ease 0.05s both}
+.err{background:rgba(239,68,68,0.08);border:1px solid rgba(127,29,29,0.4);border-radius:8px;padding:0.625rem 0.875rem;font-size:0.75rem;color:#fca5a5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-bottom:1.5rem;text-align:left;word-break:break-word;animation:fadeUp 0.4s ease 0.1s both}
+.actions{display:flex;gap:0.5rem;justify-content:center;animation:fadeUp 0.4s ease 0.15s both}
+.btn{display:inline-flex;align-items:center;gap:0.375rem;padding:0.4375rem 0.875rem;border-radius:8px;font-size:0.8125rem;font-weight:600;cursor:pointer;border:1px solid transparent;text-decoration:none;transition:all 0.15s}
+.btn-primary{background:#fafafa;color:#09090b;border-color:#fafafa}
+.btn-primary:hover{background:#e4e4e7}
+.btn-secondary{background:#1c1c21;color:#a1a1aa;border-color:#27272a}
+.btn-secondary:hover{background:#27272a;color:#fafafa}
+.auto{color:#52525b;font-size:0.6875rem;margin-top:1.25rem;animation:fadeUp 0.4s ease 0.2s both}
+</style>
+</head><body>
+<div class="c">
+<div class="spinner" role="status" aria-label="Loading"></div>
+<h1>Gateway is starting up</h1>
+<p class="desc">The OpenClaw gateway is taking longer than expected. This can happen on cold starts.</p>
+${errMsg ? `<div class="err">${errMsg}</div>` : ""}
+<div class="actions">
+<button class="btn btn-primary" onclick="location.reload()">Retry</button>
+<a href="/setup" class="btn btn-secondary">Go to Setup</a>
+</div>
+<p class="auto">This page will auto-retry in <span id="cd">5</span>s</p>
+</div>
+<script>let t=5;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
+</body></html>`);
+}
+
 // Proxy everything else to the gateway.
 const proxy = httpProxy.createProxyServer({
   target: GATEWAY_TARGET,
@@ -1779,45 +1900,16 @@ app.use(async (req, res) => {
   }
 
   if (isConfigured()) {
+    // If the gateway is already starting in the background, don't block this
+    // request for up to 45s. Instead show the "starting" page immediately.
+    if (gatewayStarting && !gatewayReady) {
+      return sendGatewayStartingPage(res, "Gateway is starting up in the background\u2026");
+    }
+
     try {
       await ensureGatewayRunning();
     } catch (err) {
-      const errMsg = escapeHtml(String(err));
-      return res.status(503).type("html").send(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Gateway Starting - OpenClaw</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#09090b;color:#fafafa;min-height:100vh;display:flex;align-items:center;justify-content:center}
-.c{max-width:420px;width:100%;padding:1.5rem;text-align:center}
-@keyframes spin{to{transform:rotate(360deg)}}
-@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.spinner{width:32px;height:32px;border:3px solid #27272a;border-top-color:#3b82f6;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 1.5rem}
-h1{font-size:1rem;font-weight:600;margin-bottom:0.375rem;animation:fadeUp 0.4s ease both}
-.desc{color:#71717a;font-size:0.8125rem;margin-bottom:1.5rem;line-height:1.5;animation:fadeUp 0.4s ease 0.05s both}
-.err{background:rgba(239,68,68,0.08);border:1px solid rgba(127,29,29,0.4);border-radius:8px;padding:0.625rem 0.875rem;font-size:0.75rem;color:#fca5a5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-bottom:1.5rem;text-align:left;word-break:break-word;animation:fadeUp 0.4s ease 0.1s both}
-.actions{display:flex;gap:0.5rem;justify-content:center;animation:fadeUp 0.4s ease 0.15s both}
-.btn{display:inline-flex;align-items:center;gap:0.375rem;padding:0.4375rem 0.875rem;border-radius:8px;font-size:0.8125rem;font-weight:600;cursor:pointer;border:1px solid transparent;text-decoration:none;transition:all 0.15s}
-.btn-primary{background:#fafafa;color:#09090b;border-color:#fafafa}
-.btn-primary:hover{background:#e4e4e7}
-.btn-secondary{background:#1c1c21;color:#a1a1aa;border-color:#27272a}
-.btn-secondary:hover{background:#27272a;color:#fafafa}
-.auto{color:#52525b;font-size:0.6875rem;margin-top:1.25rem;animation:fadeUp 0.4s ease 0.2s both}
-</style>
-</head><body>
-<div class="c">
-<div class="spinner" role="status" aria-label="Loading"></div>
-<h1>Gateway is starting up</h1>
-<p class="desc">The OpenClaw gateway is taking longer than expected. This can happen on cold starts.</p>
-<div class="err">${errMsg}</div>
-<div class="actions">
-<button class="btn btn-primary" onclick="location.reload()">Retry</button>
-<a href="/setup" class="btn btn-secondary">Go to Setup</a>
-</div>
-<p class="auto">This page will auto-retry in <span id="cd">10</span>s</p>
-</div>
-<script>let t=10;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
-</body></html>`);
+      return sendGatewayStartingPage(res, String(err));
     }
   }
 
