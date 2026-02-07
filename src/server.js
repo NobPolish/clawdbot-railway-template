@@ -378,11 +378,11 @@ function isAuthConfigured() {
 // ---------- SETUP_PASSWORD authentication ----------
 
 function requireSetupPassword(req, res, next) {
-  // Exclude public routes
+  // Exclude public routes - paths are relative when middleware is mounted on /setup
   if (
-    req.path === "/setup/password-prompt" ||
-    req.path === "/setup/verify-password" ||
-    req.path === "/setup/healthz"
+    req.path === "/password-prompt" ||
+    req.path === "/verify-password" ||
+    req.path === "/healthz"
   ) {
     return next();
   }
@@ -393,7 +393,7 @@ function requireSetupPassword(req, res, next) {
   }
 
   // For API calls, return 401
-  if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+  if (req.path.startsWith("/api/") || req.headers.accept?.includes("application/json")) {
     return res.status(401).json({ error: "Setup password required" });
   }
 
@@ -826,14 +826,14 @@ app.post("/setup/verify-password", express.urlencoded({ extended: false }), (req
   }
 });
 
+// Minimal health endpoint for Railway - must be public
+app.get("/setup/healthz", (_req, res) => res.json({ ok: true }));
+
 // Apply SETUP_PASSWORD auth to /setup routes (before GitHub OAuth)
 app.use("/setup", requireSetupPassword);
 
 // Apply auth to all routes below
 app.use(requireAuth);
-
-// Minimal health endpoint for Railway.
-app.get("/setup/healthz", (_req, res) => res.json({ ok: true }));
 
 app.get("/setup/app.js", (_req, res) => {
   // Serve JS for /setup (kept external to avoid inline encoding/template issues)
