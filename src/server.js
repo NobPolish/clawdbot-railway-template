@@ -1056,6 +1056,7 @@ app.get("/setup/create-password", (req, res) => {
 });
 
 // Simple rate limiter for password operations (prevent brute force)
+// Note: For production use, consider adding CSRF protection with a library like csurf
 const passwordAttempts = new Map();
 const MAX_ATTEMPTS = 5;
 const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
