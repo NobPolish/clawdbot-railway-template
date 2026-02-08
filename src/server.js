@@ -1061,7 +1061,7 @@ const MAX_ATTEMPTS = 5;
 const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
 
 function rateLimitPassword(req, res, next) {
-  const clientId = req.ip || req.connection.remoteAddress || "unknown";
+  const clientId = req.ip || "unknown";
   const now = Date.now();
   
   if (!passwordAttempts.has(clientId)) {
@@ -1074,11 +1074,7 @@ function rateLimitPassword(req, res, next) {
   passwordAttempts.set(clientId, recentAttempts);
   
   if (recentAttempts.length >= MAX_ATTEMPTS) {
-    // For GET requests, redirect with error
-    if (req.method === 'GET' || req.method === 'get') {
-      return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
-    }
-    // For POST requests, redirect with error
+    // Redirect with error for both GET and POST
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
   }
   
@@ -1133,6 +1129,7 @@ app.post("/setup/create-password", rateLimitPassword, express.urlencoded({ exten
 app.get("/setup/password-prompt", (req, res) => {
   const error = req.query.error || "";
   const success = req.query.success || "";
+  const info = req.query.info || "";
   
   const errorBlock = error
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
@@ -1140,6 +1137,10 @@ app.get("/setup/password-prompt", (req, res) => {
   
   const successBlock = success
     ? `<div class="alert alert-success">${escapeHtml(success)}</div>`
+    : "";
+  
+  const infoBlock = info
+    ? `<div class="alert alert-info">${escapeHtml(info)}</div>`
     : "";
   
   const githubEnabled = isAuthConfigured();
@@ -1218,6 +1219,11 @@ app.get("/setup/password-prompt", (req, res) => {
       background: rgba(34, 197, 94, 0.1);
       border: 1px solid rgba(34, 197, 94, 0.3);
       color: #86efac;
+    }
+    .alert-info {
+      background: rgba(14, 165, 233, 0.1);
+      border: 1px solid rgba(14, 165, 233, 0.3);
+      color: #7dd3fc;
     }
     label {
       display: block;
@@ -1320,7 +1326,7 @@ app.get("/setup/password-prompt", (req, res) => {
   <div class="container">
     <h1>🔐 Sign In</h1>
     <p class="subtitle">Enter your password to access the setup panel</p>
-    ${errorBlock}${successBlock}
+    ${errorBlock}${successBlock}${infoBlock}
     <form method="POST" action="/setup/verify-password">
       <label for="password">Password</label>
       <input 
@@ -1535,12 +1541,12 @@ app.post("/setup/forgot-password", rateLimitPassword, express.urlencoded({ exten
     const resetLink = `${getBaseUrl(req)}/setup/reset-password?token=${token}`;
     await sendResetEmail(resetLink);
     
-    // Redirect with success message (generic message for security)
-    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
+    // Redirect with info message (generic message for security)
+    res.redirect("/setup/password-prompt?info=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
   } catch (err) {
     console.error("[reset] Failed to send reset email:", err);
     // Don't reveal error details for security - use same message
-    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
+    res.redirect("/setup/password-prompt?info=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
   }
 });
 
@@ -1552,7 +1558,7 @@ app.get("/setup/reset-password", (req, res) => {
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Invalid reset link"));
   }
   
-  // Verify token
+  // Verify token and store in session to avoid exposing it in URLs later
   const verification = verifyResetToken(token);
   
   if (!verification.valid) {
@@ -1562,6 +1568,9 @@ app.get("/setup/reset-password", (req, res) => {
     }
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent(errorMsg));
   }
+  
+  // Store verified token in session
+  req.session.resetToken = token;
 
   const error = req.query.error || "";
   const errorBlock = error
@@ -1711,8 +1720,6 @@ app.get("/setup/reset-password", (req, res) => {
     <p class="subtitle">Choose a new password for your setup panel</p>
     ${errorBlock}
     <form method="POST" action="/setup/reset-password" id="resetForm">
-      <input type="hidden" name="token" value="${escapeHtml(token)}" />
-      
       <label for="password">New Password</label>
       <input 
         type="password" 
@@ -1815,16 +1822,19 @@ app.get("/setup/reset-password", (req, res) => {
 
 // Handle reset password submission
 app.post("/setup/reset-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
-  const { token, password, confirmPassword } = req.body;
+  const token = req.session.resetToken;
+  const { password, confirmPassword } = req.body;
   
   if (!token) {
-    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Invalid reset link"));
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Invalid reset link. Please request a new one."));
   }
   
   // Verify token
   const verification = verifyResetToken(token);
   
   if (!verification.valid) {
+    // Clear invalid token from session
+    delete req.session.resetToken;
     let errorMsg = "Invalid or expired reset link";
     if (verification.reason === "expired") {
       errorMsg = "Reset link has expired. Please request a new one.";
@@ -1832,17 +1842,17 @@ app.post("/setup/reset-password", rateLimitPassword, express.urlencoded({ extend
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent(errorMsg));
   }
   
-  // Validate password - instead of redirecting with token in URL, re-render the page with error
+  // Validate password
   if (!password || !confirmPassword) {
-    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Both fields are required"));
+    return res.redirect("/setup/reset-password?error=" + encodeURIComponent("Both fields are required"));
   }
   
   if (password.length < 8) {
-    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Password must be at least 8 characters"));
+    return res.redirect("/setup/reset-password?error=" + encodeURIComponent("Password must be at least 8 characters"));
   }
   
   if (password !== confirmPassword) {
-    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Passwords do not match"));
+    return res.redirect("/setup/reset-password?error=" + encodeURIComponent("Passwords do not match"));
   }
   
   try {
@@ -1855,13 +1865,13 @@ app.post("/setup/reset-password", rateLimitPassword, express.urlencoded({ extend
     
     // Invalidate the reset token
     invalidateResetToken();
+    delete req.session.resetToken;
     
     // Redirect to login with success message
     res.redirect("/setup/password-prompt?success=" + encodeURIComponent("Password reset successfully. Please sign in with your new password."));
   } catch (err) {
     console.error("[reset] Failed to reset password:", err);
-    // Re-render with error instead of redirecting with token in URL
-    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Failed to reset password. Please try again."));
+    return res.redirect("/setup/reset-password?error=" + encodeURIComponent("Failed to reset password. Please try again."));
   }
 });
 
