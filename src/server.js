@@ -202,6 +202,9 @@ function isConfigured() {
 
 let gatewayProc = null;
 let gatewayStarting = null;
+let gatewayRestartAttempts = 0;
+let gatewayRestartTimer = null;
+const MAX_RESTART_ATTEMPTS = 3;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -310,14 +313,65 @@ async function startGateway() {
   });
 
   gatewayProc.on("error", (err) => {
-    console.error(`[gateway] spawn error: ${String(err)}`);
+    console.error(`[gateway] spawn error: ${err.message}`);
+    if (err.code === "ENOENT") {
+      console.error(`[gateway] Binary not found. Check OPENCLAW_NODE and OPENCLAW_ENTRY paths.`);
+    } else if (err.code === "EACCES") {
+      console.error(`[gateway] Permission denied. Check file permissions.`);
+    }
     gatewayProc = null;
+    scheduleGatewayRestart();
   });
 
   gatewayProc.on("exit", (code, signal) => {
     console.error(`[gateway] exited code=${code} signal=${signal}`);
     gatewayProc = null;
+    
+    // Don't auto-restart if we're shutting down
+    if (!isShuttingDown) {
+      scheduleGatewayRestart();
+    }
   });
+}
+
+function scheduleGatewayRestart() {
+  // Clear any existing restart timer
+  if (gatewayRestartTimer) {
+    clearTimeout(gatewayRestartTimer);
+    gatewayRestartTimer = null;
+  }
+
+  // Check if we've exceeded max restart attempts
+  if (gatewayRestartAttempts >= MAX_RESTART_ATTEMPTS) {
+    console.error(`[gateway] Max restart attempts (${MAX_RESTART_ATTEMPTS}) exceeded. Manual intervention required.`);
+    return;
+  }
+
+  // Calculate exponential backoff delay: 1s, 2s, 4s
+  const delay = Math.pow(2, gatewayRestartAttempts) * 1000;
+  gatewayRestartAttempts++;
+
+  console.log(`[gateway] Scheduling restart attempt ${gatewayRestartAttempts}/${MAX_RESTART_ATTEMPTS} in ${delay}ms`);
+
+  gatewayRestartTimer = setTimeout(async () => {
+    try {
+      console.log(`[gateway] Auto-restart attempt ${gatewayRestartAttempts}/${MAX_RESTART_ATTEMPTS}`);
+      await startGateway();
+      
+      // Wait to verify it started successfully
+      const ready = await waitForGatewayReady({ timeoutMs: 10_000 });
+      if (ready) {
+        console.log("[gateway] Successfully restarted");
+        gatewayRestartAttempts = 0; // Reset counter on success
+      } else {
+        console.error("[gateway] Restart failed - not ready");
+        scheduleGatewayRestart(); // Try again
+      }
+    } catch (err) {
+      console.error("[gateway] Auto-restart failed:", err);
+      scheduleGatewayRestart(); // Try again
+    }
+  }, delay);
 }
 
 async function ensureGatewayRunning() {
@@ -391,6 +445,90 @@ const SESSION_CONFIG = {
     maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
   },
 };
+
+// ---------- Error Handling Helpers ----------
+
+function errorPageHTML(statusCode, title, message, details = null) {
+  const showDetails = details && process.env.NODE_ENV !== "production";
+  const detailsBlock = showDetails
+    ? `<details class="error-details">
+        <summary>Show Technical Details</summary>
+        <pre>${escapeHtml(details)}</pre>
+      </details>`
+    : "";
+
+  const retryButton = (statusCode === 502 || statusCode === 503)
+    ? `<button class="btn-retry" onclick="location.reload()">Retry</button>
+       <script>
+         setTimeout(() => location.reload(), 5000);
+       </script>`
+    : "";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${statusCode} - ${escapeHtml(title)}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #09090b; color: #fafafa; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      padding: 1.5rem;
+    }
+    .error-container {
+      max-width: 480px; width: 100%; text-align: center;
+    }
+    .status-code {
+      font-size: 6rem; font-weight: 700; color: #ef4444;
+      line-height: 1; margin-bottom: 1rem;
+      text-shadow: 0 0 40px rgba(239, 68, 68, 0.3);
+    }
+    h1 {
+      font-size: 1.5rem; font-weight: 600; margin-bottom: 0.75rem;
+      color: #fafafa; letter-spacing: -0.02em;
+    }
+    p {
+      font-size: 0.9375rem; color: #a1a1aa; line-height: 1.6;
+      margin-bottom: 2rem;
+    }
+    .btn-retry {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0.75rem 1.5rem; border-radius: 10px;
+      border: none; background: #3b82f6; color: #fafafa;
+      font-size: 0.875rem; font-weight: 600; cursor: pointer;
+      transition: all 0.15s; text-decoration: none;
+    }
+    .btn-retry:hover { background: #2563eb; }
+    .error-details {
+      margin-top: 2rem; text-align: left;
+      background: #131316; border: 1px solid #232329;
+      border-radius: 8px; padding: 1rem;
+    }
+    .error-details summary {
+      cursor: pointer; font-size: 0.8125rem;
+      color: #71717a; font-weight: 500;
+    }
+    .error-details pre {
+      margin-top: 0.75rem; font-size: 0.75rem;
+      color: #d4d4d8; overflow-x: auto;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="error-container">
+    <div class="status-code">${statusCode}</div>
+    <h1>${escapeHtml(title)}</h1>
+    <p>${escapeHtml(message)}</p>
+    ${retryButton}
+    ${detailsBlock}
+  </div>
+</body>
+</html>`;
+}
 
 // ---------- Username/Password Auth helpers ----------
 
@@ -2007,12 +2145,21 @@ app.get("/setup", (req, res) => {
 });
 
 app.get("/setup/api/status", async (_req, res) => {
-  const version = await runCmd(OPENCLAW_NODE, clawArgs(["--version"]));
+  try {
+    const version = await runCmd(OPENCLAW_NODE, clawArgs(["--version"]));
 
-  res.json({
-    configured: isConfigured(),
-    openclawVersion: version.output.trim(),
-  });
+    res.json({
+      configured: isConfigured(),
+      openclawVersion: version.output.trim(),
+    });
+  } catch (err) {
+    console.error("[/setup/api/status] error:", err);
+    res.status(500).json({ 
+      ok: false, 
+      error: "Failed to get status",
+      configured: isConfigured() 
+    });
+  }
 });
 
 function buildOnboardArgs(payload) {
@@ -2413,53 +2560,60 @@ app.post("/setup/api/reset", async (_req, res) => {
 });
 
 app.get("/setup/export", async (_req, res) => {
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
-  res.setHeader("content-type", "application/gzip");
-  res.setHeader(
-    "content-disposition",
-    `attachment; filename="openclaw-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.gz"`,
-  );
+    res.setHeader("content-type", "application/gzip");
+    res.setHeader(
+      "content-disposition",
+      `attachment; filename="openclaw-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.gz"`,
+    );
 
-  // Prefer exporting from a common /data root so archives are easy to inspect and restore.
-  // This preserves dotfiles like /data/.openclaw/openclaw.json.
-  const stateAbs = path.resolve(STATE_DIR);
-  const workspaceAbs = path.resolve(WORKSPACE_DIR);
+    // Prefer exporting from a common /data root so archives are easy to inspect and restore.
+    // This preserves dotfiles like /data/.openclaw/openclaw.json.
+    const stateAbs = path.resolve(STATE_DIR);
+    const workspaceAbs = path.resolve(WORKSPACE_DIR);
 
-  const dataRoot = "/data";
-  const underData = (p) => p === dataRoot || p.startsWith(dataRoot + path.sep);
+    const dataRoot = "/data";
+    const underData = (p) => p === dataRoot || p.startsWith(dataRoot + path.sep);
 
-  let cwd = "/";
-  let paths = [stateAbs, workspaceAbs].map((p) => p.replace(/^\//, ""));
+    let cwd = "/";
+    let paths = [stateAbs, workspaceAbs].map((p) => p.replace(/^\//, ""));
 
-  if (underData(stateAbs) && underData(workspaceAbs)) {
-    cwd = dataRoot;
-    // We export relative to /data so the archive contains: .openclaw/... and workspace/...
-    paths = [
-      path.relative(dataRoot, stateAbs) || ".",
-      path.relative(dataRoot, workspaceAbs) || ".",
-    ];
+    if (underData(stateAbs) && underData(workspaceAbs)) {
+      cwd = dataRoot;
+      // We export relative to /data so the archive contains: .openclaw/... and workspace/...
+      paths = [
+        path.relative(dataRoot, stateAbs) || ".",
+        path.relative(dataRoot, workspaceAbs) || ".",
+      ];
+    }
+
+    const stream = tar.c(
+      {
+        gzip: true,
+        portable: true,
+        noMtime: true,
+        cwd,
+        onwarn: () => {},
+      },
+      paths,
+    );
+
+    stream.on("error", (err) => {
+      console.error("[export]", err);
+      if (!res.headersSent) res.status(500);
+      res.end(String(err));
+    });
+
+    stream.pipe(res);
+  } catch (err) {
+    console.error("[/setup/export] error:", err);
+    if (!res.headersSent) {
+      res.status(500).type("text/plain").send(`Export failed: ${err.message}`);
+    }
   }
-
-  const stream = tar.c(
-    {
-      gzip: true,
-      portable: true,
-      noMtime: true,
-      cwd,
-      onwarn: () => {},
-    },
-    paths,
-  );
-
-  stream.on("error", (err) => {
-    console.error("[export]", err);
-    if (!res.headersSent) res.status(500);
-    res.end(String(err));
-  });
-
-  stream.pipe(res);
 });
 
 function isUnderDir(p, root) {
@@ -2556,6 +2710,7 @@ const proxy = httpProxy.createProxyServer({
   target: GATEWAY_TARGET,
   ws: true,
   xfwd: true,
+  proxyTimeout: 30000, // 30 second timeout
 });
 
 // Inject the gateway token into every proxied request so the gateway
@@ -2566,8 +2721,44 @@ proxy.on("proxyReq", (proxyReq) => {
   }
 });
 
-proxy.on("error", (err, _req, _res) => {
-  console.error("[proxy]", err);
+proxy.on("error", (err, req, res) => {
+  const timestamp = new Date().toISOString();
+  console.error(`[${timestamp}] [proxy] Error proxying ${req.method} ${req.url} to ${GATEWAY_TARGET}:`, err.message);
+
+  // If response is already sent, can't do anything
+  if (res.headersSent) {
+    return res.end();
+  }
+
+  // Determine error type and status code
+  let statusCode = 502;
+  let title = "Bad Gateway";
+  let message = "The gateway is not responding. Please try again.";
+
+  if (err.code === "ECONNREFUSED") {
+    statusCode = 503;
+    title = "Service Unavailable";
+    message = "The gateway service is currently unavailable. It may be starting up.";
+  } else if (err.code === "ECONNRESET") {
+    statusCode = 502;
+    title = "Connection Reset";
+    message = "The connection to the gateway was reset. Please try again.";
+  } else if (err.code === "ETIMEDOUT") {
+    statusCode = 504;
+    title = "Gateway Timeout";
+    message = "The gateway took too long to respond. Please try again.";
+  }
+
+  // Return appropriate response
+  if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+    return res.status(statusCode).json({
+      ok: false,
+      error: message,
+      code: err.code,
+    });
+  }
+
+  res.status(statusCode).type("html").send(errorPageHTML(statusCode, title, message, err.code));
 });
 
 app.use(async (req, res) => {
@@ -2620,6 +2811,40 @@ h1{font-size:1rem;font-weight:600;margin-bottom:0.375rem;animation:fadeUp 0.4s e
   }
 
   return proxy.web(req, res, { target: GATEWAY_TARGET });
+});
+
+// ---------- Global Error Handler ----------
+
+app.use((err, req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.error(`[${timestamp}] Error on ${req.method} ${req.url}:`, err);
+  console.error(err.stack);
+
+  // Determine if this is an API route
+  const isApiRoute = req.path.startsWith("/setup/api/");
+
+  // Determine status code
+  let statusCode = err.statusCode || err.status || 500;
+  if (statusCode < 400) statusCode = 500;
+
+  // For API routes, return JSON
+  if (isApiRoute || req.headers.accept?.includes("application/json")) {
+    return res.status(statusCode).json({
+      ok: false,
+      error: err.message || "Internal server error",
+      ...(process.env.NODE_ENV !== "production" && { stack: err.stack }),
+    });
+  }
+
+  // For browser routes, return styled HTML error page
+  const title = statusCode < 500 ? "Request Error" : "Server Error";
+  const message = statusCode < 500
+    ? err.message || "The request could not be completed."
+    : "An unexpected error occurred. Please try again later.";
+
+  res.status(statusCode).type("html").send(
+    errorPageHTML(statusCode, title, message, process.env.NODE_ENV !== "production" ? err.stack : null)
+  );
 });
 
 const server = app.listen(PORT, "0.0.0.0", () => {
@@ -2677,12 +2902,82 @@ server.on("upgrade", async (req, socket, head) => {
   proxy.ws(req, socket, head, { target: GATEWAY_TARGET });
 });
 
-process.on("SIGTERM", () => {
-  // Best-effort shutdown
+// ---------- Process-Level Error Handling and Graceful Shutdown ----------
+
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`\n[wrapper] Received ${signal}, starting graceful shutdown...`);
+
+  // Set a timeout to force exit after 10 seconds
+  const forceExitTimer = setTimeout(() => {
+    console.error("[wrapper] Graceful shutdown timeout - forcing exit");
+    process.exit(1);
+  }, 10000);
+
   try {
-    if (gatewayProc) gatewayProc.kill("SIGTERM");
-  } catch {
-    // ignore
+    // Close HTTP server (stop accepting new connections)
+    await new Promise((resolve) => {
+      server.close((err) => {
+        if (err) console.error("[wrapper] Error closing server:", err);
+        else console.log("[wrapper] HTTP server closed");
+        resolve();
+      });
+    });
+
+    // Kill gateway process
+    if (gatewayProc) {
+      console.log("[wrapper] Terminating gateway process...");
+      gatewayProc.kill("SIGTERM");
+      
+      // Wait up to 3 seconds for graceful termination
+      await new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          if (gatewayProc && !gatewayProc.killed) {
+            console.log("[wrapper] Gateway didn't exit gracefully, sending SIGKILL");
+            gatewayProc.kill("SIGKILL");
+          }
+          resolve();
+        }, 3000);
+
+        if (gatewayProc) {
+          gatewayProc.once("exit", () => {
+            clearTimeout(timeout);
+            console.log("[wrapper] Gateway process terminated");
+            resolve();
+          });
+        } else {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    }
+
+    clearTimeout(forceExitTimer);
+    console.log("[wrapper] Graceful shutdown complete");
+    process.exit(0);
+  } catch (err) {
+    console.error("[wrapper] Error during shutdown:", err);
+    clearTimeout(forceExitTimer);
+    process.exit(1);
   }
-  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+process.on("uncaughtException", (err) => {
+  console.error("[wrapper] Uncaught exception:", err);
+  console.error(err.stack);
+  gracefulShutdown("uncaughtException");
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[wrapper] Unhandled rejection at:", promise);
+  console.error("[wrapper] Reason:", reason);
+  // Don't exit on unhandled rejection, just log it
+  // In production, you might want to exit gracefully here
 });
