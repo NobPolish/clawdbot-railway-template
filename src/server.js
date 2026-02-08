@@ -31,16 +31,13 @@ const WORKSPACE_DIR =
   process.env.CLAWDBOT_WORKSPACE_DIR?.trim() ||
   path.join(STATE_DIR, "workspace");
 
-// GitHub OAuth configuration.
-// Required env vars: GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
-// Optional: GITHUB_ALLOWED_USERS (comma-separated list of GitHub usernames)
-// If GITHUB_ALLOWED_USERS is not set, any GitHub user can log in.
-const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID?.trim() || "";
-const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET?.trim() || "";
-const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || "")
-  .split(",")
-  .map((u) => u.trim().toLowerCase())
-  .filter(Boolean);
+// Wrapper auth credentials.
+// Keep SETUP_PASSWORD for backward-compat with older docs/deployments.
+const AUTH_USERNAME = process.env.AUTH_USERNAME?.trim() || "admin";
+const AUTH_PASSWORD =
+  process.env.AUTH_PASSWORD?.trim() ||
+  process.env.SETUP_PASSWORD?.trim() ||
+  "";
 
 // Session secret: reuse a persisted value for stability across restarts.
 function resolveSessionSecret() {
@@ -165,7 +162,7 @@ async function startGateway() {
 
   // The internal gateway is bound to loopback and only reachable via the
   // wrapper proxy, so we disable auth on it entirely. The wrapper handles
-  // external authentication (GitHub OAuth). This avoids the "gateway token
+  // external authentication (wrapper session). This avoids the "gateway token
   // mismatch" error that occurs because the Control UI SPA authenticates at
   // the WebSocket application-protocol level, which the proxy cannot inject.
   try {
@@ -281,40 +278,19 @@ const SESSION_CONFIG = {
   },
 };
 
-// ---------- GitHub OAuth helpers ----------
-
-async function githubFetch(url, opts = {}) {
-  const res = await fetch(url, {
-    ...opts,
-    headers: {
-      accept: "application/json",
-      ...(opts.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub API ${res.status}: ${text}`);
-  }
-  return res.json();
-}
+// ---------- Wrapper auth helpers ----------
 
 function isAuthConfigured() {
-  return Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET);
+  return Boolean(AUTH_PASSWORD);
 }
 
 function requireAuth(req, res, next) {
   // Auth routes and healthcheck are always public
-  if (
-    req.path === "/auth/github" ||
-    req.path === "/auth/github/callback" ||
-    req.path === "/auth/login" ||
-    req.path === "/setup/healthz"
-  ) {
+  if (req.path === "/auth/login" || req.path === "/setup/healthz") {
     return next();
   }
 
-  // If GitHub OAuth is not configured, fall through (allow access).
-  // This lets users still complete initial setup before configuring OAuth.
+  // If wrapper auth is not configured, allow access.
   if (!isAuthConfigured()) {
     return next();
   }
@@ -338,6 +314,7 @@ const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1); // trust Railway's reverse proxy for secure cookies
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: false }));
 
 // Session middleware
 app.use(session(SESSION_CONFIG));
@@ -350,15 +327,10 @@ function loginPageHTML(error) {
     : "";
   const notConfigured = !isAuthConfigured()
     ? `<div style="background:#fefce8;border:1px solid #fde68a;color:#92400e;padding:0.75rem 1rem;border-radius:8px;margin-bottom:1rem;font-size:0.85rem;">
-        <strong>GitHub OAuth not configured.</strong><br/>
-        Set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> in your Railway variables.<br/>
-        Optionally set <code>GITHUB_ALLOWED_USERS</code> to restrict access (comma-separated usernames).
+        <strong>Wrapper auth is disabled.</strong><br/>
+        Set <code>AUTH_PASSWORD</code> (and optional <code>AUTH_USERNAME</code>) in Railway variables to protect this instance.
       </div>`
     : "";
-  const btnDisabled = !isAuthConfigured() ? "disabled" : "";
-  const btnStyle = !isAuthConfigured()
-    ? "opacity:0.5;cursor:not-allowed;"
-    : "cursor:pointer;";
 
   return `<!doctype html>
 <html>
@@ -369,32 +341,34 @@ function loginPageHTML(error) {
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: #0a0a0a; color: #fafafa; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-    .card { background: #141414; border: 1px solid #262626; border-radius: 16px; padding: 2.5rem 2rem; max-width: 400px; width: 100%; margin: 1rem; }
+    .card { background: #141414; border: 1px solid #262626; border-radius: 16px; padding: 2.5rem 2rem; max-width: 420px; width: 100%; margin: 1rem; }
     h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.25rem; text-align: center; }
     .subtitle { color: #a3a3a3; font-size: 0.9rem; text-align: center; margin-bottom: 1.5rem; }
-    .btn-github { display: flex; align-items: center; justify-content: center; gap: 0.75rem; width: 100%; padding: 0.75rem 1.25rem; border-radius: 10px; border: 1px solid #333; background: #fafafa; color: #0a0a0a; font-size: 0.95rem; font-weight: 600; transition: all 0.15s; text-decoration: none; ${btnStyle} }
-    .btn-github:hover:not([disabled]) { background: #e5e5e5; }
-    .btn-github svg { width: 20px; height: 20px; }
+    label { display:block; margin-top: 0.9rem; margin-bottom: 0.35rem; font-size: 0.85rem; color: #d4d4d4; }
+    input { width: 100%; padding: 0.7rem 0.8rem; border-radius: 10px; border: 1px solid #333; background: #1a1a1a; color: #fafafa; }
+    button { width: 100%; margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 10px; border: 1px solid #333; background: #fafafa; color: #0a0a0a; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
     code { background: #262626; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.8rem; color: #e5e5e5; }
   </style>
 </head>
 <body>
-  <div class="card">
+  <form class="card" method="post" action="/auth/login">
     <h1>OpenClaw</h1>
     <p class="subtitle">Sign in to access your instance</p>
     ${errorBlock}
     ${notConfigured}
-    <a href="/auth/github" class="btn-github" ${btnDisabled}>
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-      Sign in with GitHub
-    </a>
-  </div>
+    <label for="username">Username</label>
+    <input id="username" name="username" required value="${escapeHtml(AUTH_USERNAME)}" autocomplete="username" />
+
+    <label for="password">Password</label>
+    <input id="password" type="password" name="password" required autocomplete="current-password" />
+
+    <button type="submit">Sign in</button>
+  </form>
 </body>
 </html>`;
 }
 
 app.get("/auth/login", (req, res) => {
-  // If already logged in, redirect to home
   if (req.session?.user) {
     return res.redirect("/");
   }
@@ -402,78 +376,27 @@ app.get("/auth/login", (req, res) => {
   res.type("html").send(loginPageHTML(error));
 });
 
-app.get("/auth/github", (req, res) => {
+app.post("/auth/login", (req, res) => {
   if (!isAuthConfigured()) {
-    return res.redirect("/auth/login?error=" + encodeURIComponent("GitHub OAuth not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET."));
+    req.session.user = { login: "open", name: "Open Access" };
+    return req.session.save(() => res.redirect("/setup"));
   }
 
-  const state = crypto.randomBytes(16).toString("hex");
-  req.session.oauthState = state;
+  const username = String(req.body?.username || "").trim();
+  const password = String(req.body?.password || "");
 
-  const params = new URLSearchParams({
-    client_id: GITHUB_CLIENT_ID,
-    redirect_uri: `${getBaseUrl(req)}/auth/github/callback`,
-    scope: "read:user",
-    state,
-  });
-
-  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
-});
-
-app.get("/auth/github/callback", async (req, res) => {
-  try {
-    const { code, state } = req.query;
-
-    if (!code || !state || state !== req.session.oauthState) {
-      return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid OAuth state. Please try again."));
-    }
-    delete req.session.oauthState;
-
-    // Exchange code for access token
-    const tokenData = await githubFetch("https://github.com/login/oauth/access_token", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code,
-      }),
-    });
-
-    if (!tokenData.access_token) {
-      return res.redirect("/auth/login?error=" + encodeURIComponent("Failed to get access token from GitHub."));
-    }
-
-    // Get user info
-    const user = await githubFetch("https://api.github.com/user", {
-      headers: { authorization: `Bearer ${tokenData.access_token}` },
-    });
-
-    const username = (user.login || "").toLowerCase();
-
-    // Check allowlist
-    if (GITHUB_ALLOWED_USERS.length > 0 && !GITHUB_ALLOWED_USERS.includes(username)) {
-      return res.redirect(
-        "/auth/login?error=" +
-          encodeURIComponent(`Access denied. User "${user.login}" is not in the allowed users list.`),
-      );
-    }
-
-    // Save to session
-    req.session.user = {
-      id: user.id,
-      login: user.login,
-      avatar: user.avatar_url,
-      name: user.name || user.login,
-    };
-
-    req.session.save(() => {
-      res.redirect("/setup");
-    });
-  } catch (err) {
-    console.error("[auth] GitHub OAuth error:", err);
-    res.redirect("/auth/login?error=" + encodeURIComponent("Authentication failed. Please try again."));
+  if (username !== AUTH_USERNAME || password !== AUTH_PASSWORD) {
+    return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid username or password."));
   }
+
+  req.session.user = {
+    id: "local-admin",
+    login: AUTH_USERNAME,
+    name: AUTH_USERNAME,
+    avatar: "",
+  };
+
+  return req.session.save(() => res.redirect("/setup"));
 });
 
 app.get("/auth/logout", (req, res) => {
@@ -488,12 +411,6 @@ app.get("/auth/me", (req, res) => {
   }
   res.json({ user: req.session.user });
 });
-
-function getBaseUrl(req) {
-  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  return `${proto}://${host}`;
-}
 
 // Apply auth to all routes below
 app.use(requireAuth);
@@ -512,7 +429,7 @@ app.get("/setup", (req, res) => {
   const userBar = user
     ? `<div class="user-bar">
         <div style="display:flex;align-items:center;gap:0.5rem;">
-          <img src="${escapeHtml(user.avatar)}" alt="" style="width:24px;height:24px;border-radius:50%;" />
+          ${user.avatar ? `<img src="${escapeHtml(user.avatar)}" alt="" style="width:24px;height:24px;border-radius:50%;" />` : `<div style="width:24px;height:24px;border-radius:50%;background:#262626;"></div>`}
           <span style="font-size:0.85rem;color:#a3a3a3;">${escapeHtml(user.name || user.login)}</span>
         </div>
         <a href="/auth/logout" style="font-size:0.85rem;color:#a3a3a3;text-decoration:none;">Sign out</a>
@@ -830,7 +747,7 @@ app.post("/setup/api/run", async (req, res) => {
   if (ok) {
     // The internal gateway is bound to loopback and only reachable through
     // the wrapper proxy, so we disable auth entirely to avoid "token mismatch"
-    // errors. The wrapper's GitHub OAuth session protects all routes externally.
+    // errors. The wrapper's session auth protects all routes externally.
     const cfgOpts = { timeoutMs: 10_000 };
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.mode", "none"]), cfgOpts);
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.bind", "loopback"]), cfgOpts);
@@ -1277,16 +1194,11 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[wrapper] gateway token: ${OPENCLAW_GATEWAY_TOKEN ? "(set)" : "(missing)"}`);
   console.log(`[wrapper] gateway target: ${GATEWAY_TARGET}`);
   if (isAuthConfigured()) {
-    console.log(`[wrapper] auth: GitHub OAuth (client_id=${GITHUB_CLIENT_ID.slice(0, 8)}...)`);
-    if (GITHUB_ALLOWED_USERS.length > 0) {
-      console.log(`[wrapper] allowed users: ${GITHUB_ALLOWED_USERS.join(", ")}`);
-    } else {
-      console.log(`[wrapper] allowed users: (any GitHub user)`);
-    }
+    console.log(`[wrapper] auth: username/password (username=${AUTH_USERNAME})`);
   } else {
     console.log(`[wrapper] ================================================`);
-    console.log(`[wrapper] WARNING: GitHub OAuth not configured!`);
-    console.log(`[wrapper] Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET`);
+    console.log(`[wrapper] WARNING: wrapper auth is disabled!`);
+    console.log(`[wrapper] Set AUTH_PASSWORD (and optional AUTH_USERNAME)`);
     console.log(`[wrapper] in your Railway variables to protect this instance.`);
     console.log(`[wrapper] ================================================`);
   }

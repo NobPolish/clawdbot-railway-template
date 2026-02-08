@@ -7,7 +7,7 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 ## What you get
 
 - **OpenClaw Gateway + Control UI** (served at `/` and `/openclaw`)
-- A friendly **Setup Wizard** at `/setup` (protected by a password)
+- A friendly **Setup Wizard** at `/setup` (protected by a simple username/password login)
 - Persistent state via **Railway Volume** (so config/credentials/memory survive redeploys)
 - One-click **Export backup** (so users can migrate off Railway later)
 - **Import backup** from `/setup` (advanced recovery)
@@ -16,7 +16,7 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 ## How it works (high level)
 
 - The container runs a wrapper web server.
-- The wrapper protects `/setup` with `SETUP_PASSWORD`.
+- The wrapper protects `/setup` with `AUTH_USERNAME` + `AUTH_PASSWORD` (or legacy `SETUP_PASSWORD`).
 - During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
 - After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
 
@@ -29,7 +29,9 @@ In Railway Template Composer:
 3) Set the following variables:
 
 Recommended:
-- `SETUP_PASSWORD` — password to access `/setup`. If not set, a secure random password will be auto-generated and shown in the deployment logs.
+- `AUTH_USERNAME` — login username for `/setup` (default: `admin`)
+- `AUTH_PASSWORD` — login password for `/setup`
+  - Backward-compatible fallback: `SETUP_PASSWORD`
 - `OPENCLAW_STATE_DIR=/data/.openclaw`
 - `OPENCLAW_WORKSPACE_DIR=/data/workspace`
 
@@ -71,7 +73,8 @@ docker build -t openclaw-railway-template .
 
 docker run --rm -p 8080:8080 \
   -e PORT=8080 \
-  -e SETUP_PASSWORD=test \
+  -e AUTH_USERNAME=admin \
+  -e AUTH_PASSWORD=test \
   -e OPENCLAW_STATE_DIR=/data/.openclaw \
   -e OPENCLAW_WORKSPACE_DIR=/data/workspace \
   -v $(pwd)/.tmpdata:/data \
@@ -88,7 +91,7 @@ For easier local development and testing, use docker-compose:
 # Copy the example environment file
 cp .env.example .env
 
-# Edit .env and set your SETUP_PASSWORD
+# Edit .env and set AUTH_PASSWORD (and optional AUTH_USERNAME)
 # Then start the container
 docker-compose up -d
 
@@ -123,7 +126,7 @@ This template makes it easy to migrate from Docker/Docker Compose to Railway:
 **Migration Steps:**
 1. Deploy this template to Railway (one-click button above)
 2. Add a Railway Volume mounted at `/data`
-3. Set `SETUP_PASSWORD` environment variable
+3. Set `AUTH_PASSWORD` (and optional `AUTH_USERNAME`) environment variable
 4. Enable public networking
 5. Access your deployment at the assigned Railway URL
 
