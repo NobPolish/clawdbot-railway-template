@@ -830,10 +830,28 @@ app.post("/auth/login", rateLimitLogin, (req, res) => {
     });
   }
 
-  // Check credentials - simple comparison is acceptable here as this isn't cryptographic
-  // The rate limiting provides protection against brute force
-  const usernameMatch = username === AUTH_USERNAME;
-  const passwordMatch = password === AUTH_PASSWORD;
+  // Check credentials using constant-time comparison to prevent timing attacks
+  // Pad strings to the same length for timingSafeEqual
+  const maxLen = Math.max(username.length, AUTH_USERNAME.length, password.length, AUTH_PASSWORD.length);
+  const usernameBuf = Buffer.alloc(maxLen);
+  const authUsernameBuf = Buffer.alloc(maxLen);
+  const passwordBuf = Buffer.alloc(maxLen);
+  const authPasswordBuf = Buffer.alloc(maxLen);
+  
+  usernameBuf.write(username);
+  authUsernameBuf.write(AUTH_USERNAME);
+  passwordBuf.write(password);
+  authPasswordBuf.write(AUTH_PASSWORD);
+  
+  let usernameMatch, passwordMatch;
+  try {
+    usernameMatch = crypto.timingSafeEqual(usernameBuf, authUsernameBuf) && username.length === AUTH_USERNAME.length;
+    passwordMatch = crypto.timingSafeEqual(passwordBuf, authPasswordBuf) && password.length === AUTH_PASSWORD.length;
+  } catch (err) {
+    // If comparison fails, treat as mismatch
+    usernameMatch = false;
+    passwordMatch = false;
+  }
 
   if (usernameMatch && passwordMatch) {
     // Successful login
@@ -2965,9 +2983,22 @@ process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 process.on("uncaughtException", (err) => {
-  console.error("[wrapper] Uncaught exception:", err);
+  console.error("[wrapper] FATAL: Uncaught exception - application in undefined state");
+  console.error(err);
   console.error(err.stack);
-  gracefulShutdown("uncaughtException");
+  
+  // Attempt minimal cleanup but exit immediately regardless
+  // The application is in an undefined state and cannot continue safely
+  try {
+    if (gatewayProc && !gatewayProc.killed) {
+      gatewayProc.kill("SIGKILL"); // Force kill immediately
+    }
+  } catch (cleanupErr) {
+    console.error("[wrapper] Error during emergency cleanup:", cleanupErr);
+  }
+  
+  // Exit immediately - do not attempt graceful shutdown
+  process.exit(1);
 });
 
 process.on("unhandledRejection", (reason, promise) => {

@@ -55,7 +55,7 @@ This template uses simple username/password authentication to protect your OpenC
 
 **AUTH_PASSWORD** (recommended)
 - The primary authentication password
-- **IMPORTANT**: Set a strong password (minimum 16 characters recommended)
+- **IMPORTANT**: Set a strong password (minimum 16 characters with uppercase, lowercase, numbers, and special characters recommended; use a password manager)
 - If not set, the instance runs in "Open Access" mode (anyone can access)
 
 **SETUP_PASSWORD** (backward compatibility)
