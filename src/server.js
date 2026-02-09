@@ -61,6 +61,13 @@ const WORKSPACE_DIR =
 const AUTH_USERNAME = process.env.AUTH_USERNAME?.trim() || "admin";
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD?.trim() || process.env.SETUP_PASSWORD?.trim() || "";
 
+// Emergency access (temporary): allows creating an authenticated setup session
+// without GitHub OAuth by presenting a one-time token. Keep this unset in normal operation.
+const TEMP_ADMIN_BYPASS_TOKEN = process.env.TEMP_ADMIN_BYPASS_TOKEN?.trim() || "";
+const TEMP_ADMIN_BYPASS_EXPIRES_AT = process.env.TEMP_ADMIN_BYPASS_EXPIRES_AT?.trim() || "";
+const TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS || "900000", 10);
+const TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS = Number.parseInt(process.env.TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS || "10", 10);
+
 // SETUP_PASSWORD configuration.
 // Returns the env var, a previously-saved password, or null (first run).
 const PASSWORD_PATH = path.join(STATE_DIR, "setup.password");
@@ -90,6 +97,7 @@ function saveResetTokens(tokens) {
 }
 
 let resetTokens = loadResetTokens();
+const tempBypassAttempts = new Map();
 
 function resolveSetupPassword() {
   const envPassword = process.env.SETUP_PASSWORD?.trim();
@@ -200,6 +208,7 @@ process.env.OPENCLAW_GATEWAY_TOKEN = OPENCLAW_GATEWAY_TOKEN;
 const INTERNAL_GATEWAY_PORT = Number.parseInt(process.env.INTERNAL_GATEWAY_PORT ?? "18789", 10);
 const INTERNAL_GATEWAY_HOST = process.env.INTERNAL_GATEWAY_HOST ?? "127.0.0.1";
 const GATEWAY_TARGET = `http://${INTERNAL_GATEWAY_HOST}:${INTERNAL_GATEWAY_PORT}`;
+const SETUP_UI_VERSION = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.RAILWAY_DEPLOYMENT_ID || "dev";
 
 // Always run the built-from-source CLI entry directly to avoid PATH/global-install mismatches.
 const OPENCLAW_ENTRY = process.env.OPENCLAW_ENTRY?.trim() || "/openclaw/dist/entry.js";
@@ -597,10 +606,88 @@ function requireSetupPassword(req, res, next) {
   return res.redirect("/setup/password-prompt");
 }
 
+function getTempBypassExpiryTs() {
+  if (!TEMP_ADMIN_BYPASS_EXPIRES_AT) return null;
+  const ts = Date.parse(TEMP_ADMIN_BYPASS_EXPIRES_AT);
+  return Number.isNaN(ts) ? null : ts;
+}
+
+function isTempBypassExpired() {
+  const expiryTs = getTempBypassExpiryTs();
+  return expiryTs != null && Date.now() > expiryTs;
+}
+
+function isTempBypassEnabled() {
+  return Boolean(TEMP_ADMIN_BYPASS_TOKEN) && !isTempBypassExpired();
+}
+
+function getBypassClientKey(req) {
+  return String(req.headers["x-forwarded-for"] || req.ip || "unknown").split(",")[0].trim();
+}
+
+function checkTempBypassRateLimit(req) {
+  const key = getBypassClientKey(req);
+  const now = Date.now();
+  const existing = tempBypassAttempts.get(key) || { count: 0, firstTs: now };
+
+  if (now - existing.firstTs > TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS) {
+    const resetState = { count: 0, firstTs: now };
+    tempBypassAttempts.set(key, resetState);
+    return { allowed: true, remaining: TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS };
+  }
+
+  if (existing.count >= TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS) {
+    const retryAfterSeconds = Math.ceil((TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS - (now - existing.firstTs)) / 1000);
+    return { allowed: false, remaining: 0, retryAfterSeconds };
+  }
+
+  return { allowed: true, remaining: TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS - existing.count };
+}
+
+function markTempBypassAttempt(req) {
+  const key = getBypassClientKey(req);
+  const now = Date.now();
+  const existing = tempBypassAttempts.get(key) || { count: 0, firstTs: now };
+  if (now - existing.firstTs > TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS) {
+    tempBypassAttempts.set(key, { count: 1, firstTs: now });
+    return;
+  }
+  existing.count += 1;
+  tempBypassAttempts.set(key, existing);
+}
+
+function clearTempBypassAttempts(req) {
+  tempBypassAttempts.delete(getBypassClientKey(req));
+}
+
+function isTempBypassTokenValid(token) {
+  if (!isTempBypassEnabled()) return false;
+  if (!token) return false;
+  const provided = Buffer.from(String(token));
+  const expected = Buffer.from(TEMP_ADMIN_BYPASS_TOKEN);
+  if (provided.length !== expected.length) return false;
+  return crypto.timingSafeEqual(provided, expected);
+}
+
+function getTempBypassStatus() {
+  const expiryTs = getTempBypassExpiryTs();
+  return {
+    configured: Boolean(TEMP_ADMIN_BYPASS_TOKEN),
+    enabled: isTempBypassEnabled(),
+    expired: isTempBypassExpired(),
+    expiresAt: TEMP_ADMIN_BYPASS_EXPIRES_AT || null,
+    expiresInSeconds: expiryTs ? Math.max(0, Math.floor((expiryTs - Date.now()) / 1000)) : null,
+    rateLimitWindowMs: TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS,
+    rateLimitMaxAttempts: TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS,
+  };
+}
+
 function requireAuth(req, res, next) {
   // Login route and healthcheck are always public
   if (
     req.path === "/auth/login" ||
+    req.path === "/auth/temp-login" ||
+    req.path === "/auth/temp-login/status" ||
     req.path === "/setup/healthz"
   ) {
     return next();
@@ -918,6 +1005,7 @@ app.get("/setup/create-password", (req, res) => {
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
 
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -1111,6 +1199,7 @@ app.get("/setup/password-prompt", (req, res) => {
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
 
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -1319,6 +1408,7 @@ app.get("/setup/forgot-password", (req, res) => {
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
 
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -1458,6 +1548,7 @@ app.get("/setup/reset-password", (req, res) => {
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
 
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -1571,6 +1662,8 @@ app.use(requireAuth);
 
 app.get("/setup/app.js", (_req, res) => {
   // Serve JS for /setup (kept external to avoid inline encoding/template issues)
+  // Prevent stale browser caches after deploys so onboarding UX updates appear immediately.
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("application/javascript");
   res.send(fs.readFileSync(path.join(process.cwd(), "src", "setup-app.js"), "utf8"));
 });
@@ -1584,6 +1677,7 @@ app.get("/setup", (req, res) => {
     : "";
   const signOutHtml = user ? `<a href="/auth/logout" class="nav-link">Sign out</a>` : "";
 
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -1946,6 +2040,8 @@ app.get("/setup", (req, res) => {
       </a>
       <div class="topbar-sep"></div>
       <span class="topbar-page">Setup</span>
+      <span class="topbar-sep"></span>
+      <span class="status-version" title="Deployed UI version">${escapeHtml(SETUP_UI_VERSION.slice(0, 12))}</span>
     </div>
     <div class="topbar-right">
       ${avatarHtml}
@@ -2218,7 +2314,7 @@ app.get("/setup", (req, res) => {
 
   </main>
 
-  <script src="/setup/app.js"></script>
+  <script src="/setup/app.js?v=${encodeURIComponent(SETUP_UI_VERSION)}"></script>
 </body>
 </html>`);
 });
