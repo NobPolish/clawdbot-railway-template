@@ -100,6 +100,18 @@ For a prioritized roadmap to make onboarding more intuitive and robust, see [ONB
 - **Provider key rejected** → Recopy token and ensure correct provider selection in `/setup`.
 - **`/setup` works but `/` fails** → Follow [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md) route and health checks.
 
+
+### `/setup` staged progress (new)
+
+The setup screen now runs a preflight check before deploy and shows explicit stages:
+
+- **Validate** → checks volume/env/provider input
+- **Configure** → confirms payload readiness
+- **Deploy** → runs onboarding
+- **Verify** → checks post-setup status
+
+If a stage fails, the UI now shows actionable next steps so you can retry quickly.
+
 ## Getting chat tokens (so you don’t have to scramble)
 
 ### Telegram bot token

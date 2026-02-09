@@ -68,3 +68,10 @@ This roadmap outlines practical changes to make first-run setup more robust, int
 - **Docs owner:** quickstart + troubleshooting clarity
 - **App owner:** `/setup` preflight + staged UX
 - **Ops owner:** release checklist + rollback readiness
+
+## Short Verification Checklist
+
+- [ ] Run **Preflight** in `/setup` and resolve blockers.
+- [ ] Confirm stage progress advances through **Validate → Configure → Deploy → Verify**.
+- [ ] Confirm success route checks: `/setup`, `/`, `/openclaw`.
+- [ ] If deploy fails, use stage-specific errors to retry without restarting from scratch.

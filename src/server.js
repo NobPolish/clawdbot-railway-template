@@ -1687,6 +1687,35 @@ app.get("/setup", (req, res) => {
 
     .separator { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
 
+
+    /* ---- Setup stages ---- */
+    .stage-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1rem; margin-bottom: 0.875rem;
+    }
+    .stage-title { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.625rem; }
+    .stage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+    .stage-item {
+      display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.625rem;
+      border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg);
+      font-size: 0.75rem; color: var(--text-dim);
+    }
+    .stage-dot { width: 8px; height: 8px; border-radius: 50%; background: #52525b; flex-shrink: 0; }
+    .stage-item.current { border-color: var(--border-focus); color: var(--text); }
+    .stage-item.current .stage-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
+    .stage-item.done .stage-dot { background: var(--success); box-shadow: 0 0 0 3px var(--success-muted); }
+    .stage-item.error .stage-dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-muted); }
+    .preflight-box {
+      display: none; margin-bottom: 0.875rem; padding: 0.75rem 0.875rem;
+      border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
+      font-size: 0.75rem;
+    }
+    .preflight-box.visible { display: block; }
+    .preflight-box h4 { margin: 0 0 0.5rem; font-size: 0.75rem; color: var(--text-muted); }
+    .preflight-list { margin: 0; padding-left: 1rem; color: var(--text-dim); }
+    .preflight-list li { margin-bottom: 0.375rem; }
+    .preflight-list .warn { color: #facc15; }
+    .preflight-list .err { color: #f87171; }
     /* ---- Empty state ---- */
     .empty-hint {
       text-align: center; padding: 2rem 1rem; color: var(--text-dim); font-size: 0.8125rem;
@@ -1802,11 +1831,27 @@ app.get("/setup", (req, res) => {
         <input type="hidden" id="flow" value="quickstart" />
       </div>
 
+      <div class="stage-card animate-in animate-in-delay-1">
+        <div class="stage-title">Setup progress</div>
+        <div class="stage-grid" id="stageGrid">
+          <div class="stage-item current" id="stage-validate"><span class="stage-dot"></span><span>Validate</span></div>
+          <div class="stage-item" id="stage-configure"><span class="stage-dot"></span><span>Configure</span></div>
+          <div class="stage-item" id="stage-deploy"><span class="stage-dot"></span><span>Deploy</span></div>
+          <div class="stage-item" id="stage-verify"><span class="stage-dot"></span><span>Verify</span></div>
+        </div>
+      </div>
+
+      <div class="preflight-box" id="preflightBox">
+        <h4>Preflight checks</h4>
+        <ul class="preflight-list" id="preflightList"></ul>
+      </div>
+
       <div class="actions animate-in animate-in-delay-1" style="margin-bottom:0.875rem;">
         <button class="btn btn-primary" id="run">
           <span class="spinner"></span>
           <span class="btn-label">Deploy Configuration</span>
         </button>
+        <button class="btn btn-secondary" id="preflightRun">Run Preflight</button>
         <button class="btn btn-ghost" id="reset">Reset</button>
       </div>
 
@@ -2098,6 +2143,115 @@ function runCmd(cmd, args, opts = {}) {
     proc.on("close", (code) => finish(code));
   });
 }
+
+function getProviderKeyHint(authChoice = "") {
+  if (authChoice === "openai-api-key") return "OpenAI keys usually start with sk-.";
+  if (authChoice === "openrouter-api-key") return "OpenRouter keys usually start with sk-or-v1-.";
+  if (authChoice === "apiKey") return "Anthropic keys usually start with sk-ant-.";
+  if (authChoice === "gemini-api-key") return "Gemini keys are long API key strings from Google AI Studio.";
+  return "Verify the provider key and try again.";
+}
+
+app.post("/setup/api/preflight", async (req, res) => {
+  const payload = req.body || {};
+  const checks = [];
+  const errors = [];
+  const warnings = [];
+
+  const addCheck = (name, ok, message, action, severity = "error") => {
+    checks.push({ name, ok, message, action, severity });
+    if (ok) return;
+    if (severity === "warning") warnings.push({ name, message, action });
+    else errors.push({ name, message, action });
+  };
+
+  const authChoice = (payload.authChoice || "").trim();
+  const authSecret = (payload.authSecret || "").trim();
+  const model = (payload.model || "").trim();
+
+  const needsSecret = authChoice !== "claude-cli" && authChoice !== "codex-cli";
+  addCheck(
+    "providerKey",
+    !needsSecret || Boolean(authSecret),
+    "Provider credential is required for this auth mode.",
+    "Paste a valid API key in the Auth Secret field before deploying.",
+  );
+
+  const providerPatterns = {
+    "openai-api-key": /^sk-/,
+    "openrouter-api-key": /^sk-or-v1-/,
+    apiKey: /^sk-ant-/,
+  };
+  if (needsSecret && providerPatterns[authChoice]) {
+    addCheck(
+      "providerKeyFormat",
+      providerPatterns[authChoice].test(authSecret),
+      "Provider key format looks invalid.",
+      getProviderKeyHint(authChoice),
+      "warning",
+    );
+  }
+
+  const providerNeedsModel = new Set([
+    "openrouter-api-key",
+    "openai-api-key",
+    "gemini-api-key",
+    "ai-gateway-api-key",
+    "apiKey",
+  ]);
+  if (providerNeedsModel.has(authChoice)) {
+    addCheck(
+      "model",
+      Boolean(model),
+      "Model is recommended for this provider.",
+      "Set a model value (for example gpt-4o or anthropic/claude-sonnet-4).",
+      "warning",
+    );
+  }
+
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    addCheck("stateDir", true, `State directory ready: ${STATE_DIR}`, "");
+  } catch (err) {
+    addCheck(
+      "stateDir",
+      false,
+      `Cannot create state directory: ${STATE_DIR}`,
+      "Ensure OPENCLAW_STATE_DIR points to a writable volume path.",
+    );
+  }
+
+  try {
+    fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+    addCheck("workspaceDir", true, `Workspace directory ready: ${WORKSPACE_DIR}`, "");
+  } catch (err) {
+    addCheck(
+      "workspaceDir",
+      false,
+      `Cannot create workspace directory: ${WORKSPACE_DIR}`,
+      "Ensure OPENCLAW_WORKSPACE_DIR points to a writable volume path.",
+    );
+  }
+
+  if (STATE_DIR.startsWith("/data") || WORKSPACE_DIR.startsWith("/data")) {
+    addCheck(
+      "dataMount",
+      fs.existsSync("/data"),
+      "Expected Railway volume mount at /data was not found.",
+      "Attach a Railway Volume mounted at /data and redeploy.",
+    );
+  } else {
+    addCheck(
+      "dataMount",
+      false,
+      "State/workspace are not under /data; persistence may be lost on redeploy.",
+      "Set OPENCLAW_STATE_DIR=/data/.openclaw and OPENCLAW_WORKSPACE_DIR=/data/workspace.",
+      "warning",
+    );
+  }
+
+  return res.json({ ok: errors.length === 0, errors, warnings, checks });
+});
 
 app.post("/setup/api/run", async (req, res) => {
   try {
