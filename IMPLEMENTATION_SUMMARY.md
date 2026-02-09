@@ -96,8 +96,6 @@ Based on the current repository state and the updated documentation set, the bes
 
 This recommendation balances speed and safety: documentation maturity is now sufficient for broad adoption, while the checklist prevents avoidable onboarding regressions.
 
-## Suggested Next Prompt for Iteration
+## Next Execution Recommendation
 
-Use this prompt to drive the next high-impact pass:
-
-> "Create a concise `RELEASE_CHECKLIST.md` for this Railway template with pre-release gates, smoke-test commands, `/setup` verification steps, rollback triggers, and ownership tags. Keep it under 100 lines and align each gate with existing docs."
+Prioritize implementing P1 onboarding UX improvements in `/setup` (preflight checks + stage-based progress + actionable error states), then validate with the release checklist before template publication updates.

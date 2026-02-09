@@ -92,6 +92,14 @@ If your goal is highest first-run success, use this sequence:
 
 For a prioritized roadmap to make onboarding more intuitive and robust, see [ONBOARDING_IMPROVEMENTS.md](./ONBOARDING_IMPROVEMENTS.md).
 
+
+### Common setup blockers (quick fixes)
+
+- **Can’t access `/setup`** → Verify `SETUP_PASSWORD` and check deploy logs for auto-generated value.
+- **Setup saves but data disappears** → Confirm a Railway Volume is mounted at `/data`.
+- **Provider key rejected** → Recopy token and ensure correct provider selection in `/setup`.
+- **`/setup` works but `/` fails** → Follow [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md) route and health checks.
+
 ## Getting chat tokens (so you don’t have to scramble)
 
 ### Telegram bot token

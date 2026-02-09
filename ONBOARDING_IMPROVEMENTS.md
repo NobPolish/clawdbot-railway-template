@@ -1,73 +1,70 @@
 # Onboarding Improvements Roadmap
 
-This document proposes practical, user-centric improvements to make first-run success faster and more reliable.
+This roadmap outlines practical changes to make first-run setup more robust, intuitive, and user-centric.
 
 ## Goals
 
-- Reduce time-to-first-success for non-technical users.
-- Minimize setup mistakes (password, volume, provider keys).
-- Improve confidence with visible progress and recovery guidance.
+- Reduce time-to-first-success for non-technical deployers.
+- Minimize setup failures (password, volume, provider credentials).
+- Increase user confidence with clear progress and recovery steps.
 
-## High-Impact Improvements (Prioritized)
+## Prioritized Improvements
 
-## P0 — Immediate (docs + flow clarity)
+## P0 — Immediate (Docs + clarity, low effort)
 
-1. **First 10 Minutes Checklist in README**
-   - Add a compact checklist with only required actions.
-   - Include explicit “what success looks like” checkpoints.
+1. **First-10-minutes checklist**
+   - Keep only required actions and success checkpoints.
+2. **Decision-based guidance**
+   - Branch instructions for missing provider key vs. ready provider key.
+3. **Failure-first troubleshooting**
+   - Map common setup failures to exact fixes.
+4. **Post-setup verification sequence**
+   - Validate `/setup` → `/` → `/openclaw` (+ health check).
 
-2. **Decision-based setup guidance**
-   - “If you have no provider key yet, do this first.”
-   - “If setup password is auto-generated, where to find it.”
+## P1 — Near-term (Setup UX + validation)
 
-3. **Failure-first troubleshooting path**
-   - Common failures mapped to exact fixes:
-     - missing `/data` volume,
-     - wrong/unknown `SETUP_PASSWORD`,
-     - invalid provider token,
-     - setup completed but `/` not loading.
+1. **Preflight checks in `/setup`**
+   - Detect missing volume/env vars before deployment starts.
+2. **Stage-based setup progress**
+   - Show Validate → Configure → Deploy → Verify status.
+3. **Contextual field help**
+   - Inline hints for token locations and expected formats.
+4. **Actionable error messages**
+   - Every error includes next action and retry guidance.
 
-4. **Stronger post-setup verification**
-   - Validate `/setup`, `/`, `/openclaw`, and health endpoint in one short sequence.
+## P2 — Scale (Supportability + optimization)
 
-## P1 — Productized onboarding UX
+1. **Guided first successful run**
+   - One-click starter action after onboarding.
+2. **Diagnostics export**
+   - Sanitized diagnostics package for support.
+3. **Privacy-safe funnel analytics**
+   - Track where users drop off and optimize accordingly.
 
-1. **Setup progress stages in UI**
-   - Show 4 explicit stages: Validate → Configure → Deploy → Verify.
-   - Provide stage-specific error messages and next action.
+## Top Failure Modes and Mitigations
 
-2. **Preflight checks before onboarding**
-   - Detect and report missing volume path/env vars before attempting deploy.
-   - Validate provider key format and required fields before submission.
+| Failure Mode | User Symptom | Mitigation |
+|---|---|---|
+| Missing `/data` mount | Setup appears to work, state not retained | Add preflight mount check + explicit warning before deploy |
+| Unknown `SETUP_PASSWORD` | Cannot enter `/setup` | Add log-location hint + reset instructions |
+| Invalid provider credentials | Setup fails late | Validate format before deploy + provider-specific guidance |
+| Setup completes but app route fails | `/` or `/openclaw` unavailable | Add final verification step and route-specific troubleshooting |
 
-3. **Contextual help in `/setup`**
-   - Inline “what this field is” and “where to find this value” hints.
-   - Quick links for OpenAI/OpenRouter/Anthropic token generation.
-
-4. **Copy-paste safe examples**
-   - Provide exact env var snippets users can copy.
-
-## P2 — Confidence + support at scale
-
-1. **Guided “first agent run” after setup**
-   - One-click starter task to confirm model/provider works.
-
-2. **Diagnostics bundle export**
-   - Export sanitized onboarding diagnostics for support/debugging.
-
-3. **Onboarding analytics (privacy-safe)**
-   - Track completion funnel: start, password auth success, deploy success, first route load.
-   - Use data to reduce drop-off points.
-
-## Suggested Success Metrics
+## Success Metrics
 
 - Median time from deploy to first successful `/` load.
 - `/setup` completion rate.
-- Error rate by stage (password/auth, provider key, volume mount).
-- Support tickets per 100 new deployments.
+- Stage-level error rate (auth, provider, volume).
+- Support requests per 100 new deployments.
 
-## Recommended Implementation Sequence
+## Recommended Execution Sequence
 
-1. Ship P0 documentation improvements (fastest impact).
-2. Add P1 preflight + staged progress UX in `/setup`.
-3. Add P2 diagnostics + analytics for continuous optimization.
+1. Implement P0 documentation and verification improvements.
+2. Implement P1 preflight and staged progress UI in `/setup`.
+3. Implement P2 diagnostics and analytics for continuous iteration.
+
+## Suggested Owners
+
+- **Docs owner:** quickstart + troubleshooting clarity
+- **App owner:** `/setup` preflight + staged UX
+- **Ops owner:** release checklist + rollback readiness
