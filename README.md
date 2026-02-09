@@ -79,6 +79,48 @@ Then:
 - Complete setup
 - Visit `https://<your-app>.up.railway.app/` and `/openclaw`
 
+
+## Make onboarding easier (user-centric)
+
+If your goal is highest first-run success, use this sequence:
+
+1. Deploy with a mounted `/data` volume.
+2. Confirm `OPENCLAW_STATE_DIR` and `OPENCLAW_WORKSPACE_DIR` point to `/data`.
+3. Open `/setup` and finish provider key setup first.
+4. Verify routes in order: `/setup` → `/` → `/openclaw`.
+5. If anything fails, follow the release checklist and troubleshooting docs before retrying.
+
+For a prioritized roadmap to make onboarding more intuitive and robust, see [ONBOARDING_IMPROVEMENTS.md](./ONBOARDING_IMPROVEMENTS.md).
+
+
+### Common setup blockers (quick fixes)
+
+- **Can’t access `/setup`** → Verify `SETUP_PASSWORD` and check deploy logs for auto-generated value.
+- **Setup saves but data disappears** → Confirm a Railway Volume is mounted at `/data`.
+- **Provider key rejected** → Recopy token and ensure correct provider selection in `/setup`.
+- **`/setup` works but `/` fails** → Follow [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md) route and health checks.
+- **Advanced setup errors** → `/setup` now returns actionable error codes/messages with "Next" actions for faster recovery.
+
+
+### `/setup` staged progress (new)
+
+The setup screen now runs a preflight check before deploy and shows explicit stages:
+
+- **Validate** → checks volume/env/provider input
+- **Configure** → confirms payload readiness
+- **Deploy** → runs onboarding
+- **Verify** → checks post-setup status
+
+If a stage fails, the UI now shows actionable next steps so you can retry quickly.
+
+
+### If Railway URL still shows old setup UI
+
+- Redeploy the latest commit in Railway (or trigger a new deploy from the linked branch).
+- Open `/setup` in a private/incognito window to bypass stale browser state.
+- Confirm the small version badge in the setup top bar changes after deploy.
+- If it does not change, verify Railway is tracking the expected branch/commit.
+
 ## Getting chat tokens (so you don’t have to scramble)
 
 ### Telegram bot token
@@ -93,6 +135,76 @@ Then:
 3) Open the **Bot** tab → **Add Bot**
 4) Copy the **Bot Token** and paste it into `/setup`
 5) Invite the bot to your server (OAuth2 URL Generator → scopes: `bot`, `applications.commands`; then choose permissions)
+
+
+
+### Railway variables (copy/paste starter)
+
+Use this baseline for a secure, fast first deploy:
+
+```env
+OPENCLAW_STATE_DIR=/data/.openclaw
+OPENCLAW_WORKSPACE_DIR=/data/workspace
+OPENCLAW_GATEWAY_TOKEN=<generate-strong-secret>
+SETUP_PASSWORD=
+
+# Optional hardening (recommended)
+GITHUB_CLIENT_ID=<github-oauth-client-id>
+GITHUB_CLIENT_SECRET=<github-oauth-client-secret>
+GITHUB_ALLOWED_USERS=<your-github-username>
+
+# Emergency-only (remove after recovery)
+# TEMP_ADMIN_BYPASS_TOKEN=<temporary-random-secret>
+# TEMP_ADMIN_BYPASS_EXPIRES_AT=2026-02-10T00:00:00Z
+# TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS=900000
+# TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS=10
+```
+
+Notes:
+- Leave `SETUP_PASSWORD` empty to auto-generate on first boot (check logs).
+- If you enable emergency bypass, always set an expiry and remove bypass vars immediately after access recovery.
+
+## Emergency access (temporary, secure fallback)
+
+If GitHub OAuth credentials are unavailable and you need immediate setup access:
+
+1. Set `TEMP_ADMIN_BYPASS_TOKEN` in Railway variables to a long random secret.
+2. (Recommended) Set `TEMP_ADMIN_BYPASS_EXPIRES_AT` to an ISO timestamp (for example, 30 minutes from now).
+3. Redeploy.
+
+You can inspect emergency bypass status safely (no secret value exposed):
+
+```bash
+curl https://<your-app>.up.railway.app/auth/temp-login/status
+```
+
+4. Run this once (replace token):
+
+```bash
+curl -X POST https://<your-app>.up.railway.app/auth/temp-login \
+  -H 'content-type: application/json' \
+  -d '{"token":"<TEMP_ADMIN_BYPASS_TOKEN>"}'
+```
+
+5. Open `/setup` in the same browser session.
+6. **After recovering access**, remove `TEMP_ADMIN_BYPASS_TOKEN` (and expiry var) and redeploy.
+
+Security notes:
+- This bypass is disabled unless `TEMP_ADMIN_BYPASS_TOKEN` is explicitly set.
+- Keep the token private and rotate/remove immediately after use.
+- Bypass login attempts are rate-limited; repeated invalid tokens are temporarily blocked.
+
+## How to find/create GitHub OAuth credentials
+
+1. Go to GitHub → **Settings** → **Developer settings** → **OAuth Apps**.
+2. Create or open your OAuth App.
+3. Set callback URL to: `https://<your-app>.up.railway.app/auth/github/callback`
+4. Copy `Client ID` and generate/copy `Client Secret`.
+5. Add to Railway variables:
+   - `GITHUB_CLIENT_ID`
+   - `GITHUB_CLIENT_SECRET`
+   - Optional: `GITHUB_ALLOWED_USERS=yourusername`
+6. Redeploy and test `/auth/login`.
 
 ## Local smoke test
 
