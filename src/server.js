@@ -151,6 +151,13 @@ function savePassword(password) {
   SETUP_PASSWORD = password;
 }
 
+// Email configuration for password reset
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL?.trim() || "";
+const SMTP_HOST = process.env.SMTP_HOST?.trim() || "";
+const SMTP_PORT = Number.parseInt(process.env.SMTP_PORT || "587", 10);
+const SMTP_USER = process.env.SMTP_USER?.trim() || "";
+const SMTP_PASS = process.env.SMTP_PASS?.trim() || "";
+
 // Session secret: reuse a persisted value for stability across restarts.
 function resolveSessionSecret() {
   const envSecret = process.env.SESSION_SECRET?.trim();
@@ -235,6 +242,93 @@ function isConfigured() {
   }
 }
 
+// Password authentication helpers
+function passwordHashPath() {
+  return path.join(STATE_DIR, "setup.password.hash");
+}
+
+function isPasswordSet() {
+  try {
+    return fs.existsSync(passwordHashPath());
+  } catch {
+    return false;
+  }
+}
+
+function resetTokenPath() {
+  return path.join(STATE_DIR, "reset.token");
+}
+
+function generateResetToken() {
+  const token = crypto.randomBytes(32).toString("hex");
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  return { token, hash };
+}
+
+function saveResetToken(hash) {
+  try {
+    const expiry = Date.now() + 60 * 60 * 1000; // 1 hour
+    const data = JSON.stringify({ hash, expiry });
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(resetTokenPath(), data, { encoding: "utf8", mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function verifyResetToken(token) {
+  try {
+    const data = JSON.parse(fs.readFileSync(resetTokenPath(), "utf8"));
+    const hash = crypto.createHash("sha256").update(token).digest("hex");
+    
+    if (data.hash !== hash) {
+      return { valid: false, reason: "invalid" };
+    }
+    
+    if (Date.now() > data.expiry) {
+      return { valid: false, reason: "expired" };
+    }
+    
+    return { valid: true };
+  } catch {
+    return { valid: false, reason: "invalid" };
+  }
+}
+
+function invalidateResetToken() {
+  try {
+    fs.unlinkSync(resetTokenPath());
+  } catch {
+    // ignore
+  }
+}
+
+async function sendResetEmail(resetLink) {
+  if (!ADMIN_EMAIL || !SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    throw new Error("Email not configured");
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS,
+    },
+  });
+
+  await transporter.sendMail({
+    from: SMTP_USER,
+    to: ADMIN_EMAIL,
+    subject: "OpenClaw Setup - Password Reset",
+    text: `You requested a password reset for your OpenClaw setup panel.\n\nClick here to reset your password:\n${resetLink}\n\nThis link expires in 1 hour.\n\nIf you didn't request this, please ignore this email.`,
+    html: `<p>You requested a password reset for your OpenClaw setup panel.</p><p><a href="${resetLink}">Click here to reset your password</a></p><p>This link expires in 1 hour.</p><p>If you didn't request this, please ignore this email.</p>`,
+  });
+}
+
+
 let gatewayProc = null;
 let gatewayStarting = null;
 let gatewayRestartAttempts = 0;
@@ -257,17 +351,28 @@ async function waitForGatewayReady(opts = {}) {
         : {};
       for (const p of paths) {
         try {
-          const res = await fetch(`${GATEWAY_TARGET}${p}`, { method: "GET", headers });
-          // Any HTTP response means the port is open.
-          if (res) return true;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 3000);
+          const res = await fetch(`${GATEWAY_TARGET}${p}`, {
+            method: "GET",
+            headers,
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
+          // Must be an actual success or redirect — NOT a 401/403 auth rejection.
+          // A 401/403 means the port is open but auth is misconfigured; that is NOT ready.
+          if (res && res.status < 400) return true;
+          if (res && res.status === 401) {
+            console.warn(`[waitForGatewayReady] Got 401 at ${p} — gateway is up but rejecting our token`);
+          }
         } catch {
-          // try next
+          // Connection refused / timeout — not ready yet
         }
       }
     } catch {
       // not ready
     }
-    await sleep(250);
+    await sleep(500);
   }
   return false;
 }
@@ -290,18 +395,22 @@ async function startGateway() {
 
     if (!cfg.gateway) cfg.gateway = {};
 
-    // Ensure gateway auth uses token mode with the wrapper's known token.
-    if (cfg.gateway.authMode !== "token") {
-      cfg.gateway.authMode = "token";
+    // Remove the legacy "authMode" key — OpenClaw rejects it as unrecognized
+    // and crashes on startup if present.
+    if ("authMode" in cfg.gateway) {
+      delete cfg.gateway.authMode;
       dirty = true;
     }
 
-    // Also patch the nested auth object if present (older config format).
-    if (cfg.gateway.auth) {
-      if (cfg.gateway.auth.mode && cfg.gateway.auth.mode !== "token") {
-        cfg.gateway.auth.mode = "token";
-        dirty = true;
-      }
+    // Ensure the nested auth object has mode + token.
+    if (!cfg.gateway.auth) cfg.gateway.auth = {};
+    if (cfg.gateway.auth.mode !== "token") {
+      cfg.gateway.auth.mode = "token";
+      dirty = true;
+    }
+    if (cfg.gateway.auth.token !== OPENCLAW_GATEWAY_TOKEN) {
+      cfg.gateway.auth.token = OPENCLAW_GATEWAY_TOKEN;
+      dirty = true;
     }
 
     // Ensure bind and port are correct.
@@ -316,10 +425,26 @@ async function startGateway() {
 
     if (dirty) {
       fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2), "utf8");
-      console.log("[wrapper] patched gateway config: auth=token, bind=loopback, port=" + INTERNAL_GATEWAY_PORT);
+      console.log("[wrapper] patched gateway config: auth=token, token=(set), bind=loopback, port=" + INTERNAL_GATEWAY_PORT);
     }
   } catch (err) {
     console.warn(`[wrapper] could not patch gateway config: ${err.message}`);
+  }
+
+  // Run doctor --fix to clean up any remaining config schema issues
+  // (e.g. leftover unrecognized keys from older wrapper versions).
+  try {
+    childProcess.spawnSync(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]), {
+      stdio: "inherit",
+      timeout: 15_000,
+      env: {
+        ...process.env,
+        OPENCLAW_STATE_DIR: STATE_DIR,
+        OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+      },
+    });
+  } catch (err) {
+    console.warn(`[wrapper] doctor --fix failed: ${err.message}`);
   }
 
   const args = [
@@ -412,12 +537,17 @@ async function ensureGatewayRunning() {
   if (gatewayProc) {
     // Fast readiness probe (1s) -- if already running it should respond quickly.
     const alive = await waitForGatewayReady({ timeoutMs: 2_000 });
-    if (alive) return { ok: true };
+    if (alive) {
+      gatewayReady = true;
+      gatewayRestartCount = 0;  // Reset backoff on confirmed health.
+      return { ok: true };
+    }
     // Process object exists but not responding -- kill and restart.
     console.warn("[wrapper] gateway process exists but not responding, restarting...");
     try { gatewayProc.kill("SIGTERM"); } catch { /* ignore */ }
     await sleep(500);
     gatewayProc = null;
+    gatewayReady = false;
   }
   if (!gatewayStarting) {
     gatewayStarting = (async () => {
@@ -432,6 +562,9 @@ async function ensureGatewayRunning() {
         }
         throw new Error("Gateway did not become ready in time");
       }
+      gatewayReady = true;
+      gatewayRestartCount = 0;  // Reset backoff on successful start.
+      console.log("[wrapper] gateway is ready and accepting requests");
     })().finally(() => {
       gatewayStarting = null;
     });
@@ -702,17 +835,42 @@ function requireAuth(req, res, next) {
     return next();
   }
 
-  if (req.session?.user) {
+  // Check if user is authenticated via password
+  if (req.session?.setupPasswordVerified) {
     return next();
   }
 
-  // For API calls, return 401
-  if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
-    return res.status(401).json({ error: "Not authenticated" });
+  // If password is set, redirect to password prompt
+  if (isPasswordSet()) {
+    // For API calls, return 401
+    if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    // For page requests, redirect to password prompt
+    return res.redirect("/setup/password-prompt");
   }
 
-  // For page requests, redirect to login
-  return res.redirect("/auth/login");
+  // If GitHub OAuth is not configured and password is not set, redirect to password creation
+  if (!isAuthConfigured() && !isPasswordSet()) {
+    // Allow access to setup to create password
+    if (req.path.startsWith("/setup")) {
+      // Redirect to password creation page
+      return res.redirect("/setup/create-password");
+    }
+  }
+
+  // If GitHub OAuth is configured but user not authenticated
+  if (isAuthConfigured()) {
+    // For API calls, return 401
+    if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    // For page requests, redirect to login
+    return res.redirect("/auth/login");
+  }
+
+  // Fallback: allow access (for initial setup)
+  return next();
 }
 
 // ---------- Express app ----------
@@ -3509,9 +3667,24 @@ app.post("/setup/api/run", async (req, res) => {
 
     // Optional channel setup (only after successful onboarding, and only if the installed CLI supports it).
     // The internal gateway uses token auth with the wrapper's known token.
-    // OpenClaw 2026.2.4+ rejects "none" as a gateway.auth.mode value.
+    // Only use nested keys (gateway.auth.mode / gateway.auth.token);
+    // the flat "gateway.authMode" key is unrecognized by OpenClaw and crashes the gateway.
+    // Remove legacy authMode key directly from the JSON file
+    // ("config unset" may not be a valid CLI command in all OpenClaw versions).
+    try {
+      const cfgFile = configPath();
+      const cfgRaw = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+      if (cfgRaw.gateway && "authMode" in cfgRaw.gateway) {
+        delete cfgRaw.gateway.authMode;
+        fs.writeFileSync(cfgFile, JSON.stringify(cfgRaw, null, 2), "utf8");
+        console.log("[setup] removed legacy gateway.authMode from config");
+      }
+    } catch (e) {
+      console.warn("[setup] could not clean authMode:", e.message);
+    }
     const cfgOpts = { timeoutMs: 10_000 };
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.authMode", "token"]), cfgOpts);
+    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.mode", "token"]), cfgOpts);
+    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]), cfgOpts);
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.bind", "loopback"]), cfgOpts);
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.port", String(INTERNAL_GATEWAY_PORT)]), cfgOpts);    const modelVal = (payload.model || "").trim();
     if (modelVal) {
@@ -4021,15 +4194,53 @@ h1{font-size:1rem;font-weight:600;margin-bottom:0.375rem;animation:fadeUp 0.4s e
 <div class="spinner" role="status" aria-label="Loading"></div>
 <h1>Gateway is starting up</h1>
 <p class="desc">The OpenClaw gateway is taking longer than expected. This can happen on cold starts.</p>
-<div class="err">${errMsg}</div>
+${errMsg ? `<div class="err">${errMsg}</div>` : ""}
 <div class="actions">
 <button class="btn btn-primary" onclick="location.reload()">Retry</button>
 <a href="/setup" class="btn btn-secondary">Go to Setup</a>
 </div>
-<p class="auto">This page will auto-retry in <span id="cd">10</span>s</p>
+<p class="auto">This page will auto-retry in <span id="cd">5</span>s</p>
 </div>
-<script>let t=10;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
+<script>let t=5;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
 </body></html>`);
+}
+
+// Proxy everything else to the gateway.
+const proxy = httpProxy.createProxyServer({
+  target: GATEWAY_TARGET,
+  ws: true,
+  xfwd: true,
+});
+
+// Inject the gateway token into every proxied request so the gateway
+// accepts it (auth is now "token" mode instead of the invalid "none").
+proxy.on("proxyReq", (proxyReq) => {
+  if (OPENCLAW_GATEWAY_TOKEN) {
+    proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
+  }
+});
+
+proxy.on("error", (err, _req, _res) => {
+  console.error("[proxy]", err);
+});
+
+app.use(async (req, res) => {
+  // If not configured, force users to /setup for any non-setup routes.
+  if (!isConfigured() && !req.path.startsWith("/setup")) {
+    return res.redirect("/setup");
+  }
+
+  if (isConfigured()) {
+    // If the gateway is already starting in the background, don't block this
+    // request for up to 45s. Instead show the "starting" page immediately.
+    if (gatewayStarting && !gatewayReady) {
+      return sendGatewayStartingPage(res, "Gateway is starting up in the background\u2026");
+    }
+
+    try {
+      await ensureGatewayRunning();
+    } catch (err) {
+      return sendGatewayStartingPage(res, String(err));
     }
   }
 
