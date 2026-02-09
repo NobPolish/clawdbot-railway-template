@@ -912,7 +912,6 @@ function loginPageHTML(error) {
 }
 
 app.get("/auth/login", (req, res) => {
-  // If already logged in, redirect to home
   if (req.session?.user) {
     return res.redirect("/");
   }

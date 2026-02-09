@@ -7,7 +7,7 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 ## What you get
 
 - **OpenClaw Gateway + Control UI** (served at `/` and `/openclaw`)
-- A friendly **Setup Wizard** at `/setup` (protected by a password)
+- A friendly **Setup Wizard** at `/setup` (protected by a simple username/password login)
 - Persistent state via **Railway Volume** (so config/credentials/memory survive redeploys)
 - One-click **Export backup** (so users can migrate off Railway later)
 - **Import backup** from `/setup` (advanced recovery)
