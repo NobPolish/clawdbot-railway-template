@@ -97,6 +97,26 @@ Notes:
    - This service is configured to listen on port `8080` (including custom domains).
 5) Deploy.
 
+SETUP_PASSWORD was not configured. Auto-generated password:
+
+  f1c707bda35de7f993c4e2745176f456
+
+Save this password to access /setup.
+```
+
+### Option 2: GitHub OAuth (Optional)
+
+For additional security, you can enable GitHub OAuth:
+
+1. Create a GitHub OAuth App at https://github.com/settings/developers
+2. Set Authorization callback URL: `https://your-app.railway.app/auth/github/callback`
+3. Add Railway environment variables:
+   - `GITHUB_CLIENT_ID` — your OAuth app client ID
+   - `GITHUB_CLIENT_SECRET` — your OAuth app client secret
+   - `GITHUB_ALLOWED_USERS` — (optional) comma-separated list of allowed GitHub usernames
+
+Both authentication methods work simultaneously. See [MIGRATION_SETUP_PASSWORD.md](./MIGRATION_SETUP_PASSWORD.md) for detailed migration guide.
+
 ## First-Time Setup
 
 On first visit to your deployment:
