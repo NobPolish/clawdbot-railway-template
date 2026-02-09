@@ -38,7 +38,7 @@ Everything else can wait.
 ## How it works (high level)
 
 - The container runs a wrapper web server.
-- The wrapper protects `/setup` with `SETUP_PASSWORD`.
+- The wrapper protects `/setup` with a password you create on first visit.
 - During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
 - After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
 
@@ -97,6 +97,53 @@ Notes:
    - This service is configured to listen on port `8080` (including custom domains).
 5) Deploy.
 
+## First-Time Setup
+
+On first visit to your deployment:
+
+1. **Visit** `https://<your-app>.up.railway.app/setup`
+2. **Create Password** — You'll be greeted with a password creation wizard
+   - Enter a secure password (minimum 8 characters)
+   - Confirm your password
+   - Click "Set Password"
+3. **You're in!** — After creating your password, you'll be automatically logged in
+4. **Complete Setup** — Configure your AI provider and bot tokens
+5. **Access OpenClaw** — Visit `https://<your-app>.up.railway.app/` and `/openclaw`
+
+## Password Management
+
+### Signing In
+
+After initial setup, visiting `/setup` will show a sign-in page where you enter your password.
+
+### Forgot Password?
+
+If you forget your password:
+
+1. Click "Forgot Password?" on the sign-in page
+2. If you've configured email settings (`ADMIN_EMAIL` and SMTP), you'll receive a reset link
+3. Click the link in your email to reset your password
+
+**Alternative:** If email is not configured, you can manually reset by deleting the password hash file from Railway's volume using Railway CLI:
+```bash
+railway shell
+rm /data/.openclaw/setup.password.hash
+exit
+```
+
+### Email Configuration for Password Reset
+
+To enable password reset via email, configure these environment variables in Railway:
+
+```
+ADMIN_EMAIL=your-email@example.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your-email@gmail.com
+SMTP_PASS=your-app-password
+```
+
+**Gmail Example:** If using Gmail, you'll need to create an [App Password](https://support.google.com/accounts/answer/185833) instead of using your regular password.
 Then:
 - Visit `https://<your-app>.up.railway.app/setup`
 - Sign in with your username (default: `admin`) and `AUTH_PASSWORD`
@@ -247,7 +294,6 @@ docker build \
 
 docker run --rm -p 8080:8080 \
   -e PORT=8080 \
-  -e AUTH_PASSWORD=test \
   -e OPENCLAW_STATE_DIR=/data/.openclaw \
   -e OPENCLAW_WORKSPACE_DIR=/data/workspace \
   -v $(pwd)/.tmpdata:/data \
@@ -281,8 +327,7 @@ For easier local development and testing, use docker-compose:
 # Copy the example environment file
 cp .env.example .env
 
-# Edit .env and set your SETUP_PASSWORD
-# Then start the container
+# Start the container (you'll create a password on first visit to /setup)
 docker-compose up -d
 
 # View logs
