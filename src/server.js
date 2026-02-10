@@ -727,9 +727,7 @@ function requireSetupPassword(req, res, next) {
     req.path === "/create-password" ||
     req.path === "/save-password" ||
     req.path === "/forgot-password" ||
-    req.path === "/request-reset" ||
     req.path === "/reset-password" ||
-    req.path === "/confirm-reset" ||
     req.path === "/healthz"
   ) {
     return next();
@@ -1533,24 +1531,24 @@ app.get("/setup/password-prompt", (req, res) => {
 });
 
 // Simple rate limiter for password verification (prevent brute force)
-const passwordAttempts = new Map();
-const MAX_ATTEMPTS = 5;
-const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const legacyPasswordAttempts = new Map();
+const LEGACY_MAX_ATTEMPTS = 5;
+const LEGACY_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
 
-function rateLimitPassword(req, res, next) {
+function legacyRateLimitPassword(req, res, next) {
   const clientId = req.ip || req.connection.remoteAddress || "unknown";
   const now = Date.now();
   
-  if (!passwordAttempts.has(clientId)) {
-    passwordAttempts.set(clientId, []);
+  if (!legacyPasswordAttempts.has(clientId)) {
+    legacyPasswordAttempts.set(clientId, []);
   }
   
-  const attempts = passwordAttempts.get(clientId);
+  const attempts = legacyPasswordAttempts.get(clientId);
   // Remove old attempts outside the window
-  const recentAttempts = attempts.filter(time => now - time < ATTEMPT_WINDOW);
-  passwordAttempts.set(clientId, recentAttempts);
+  const recentAttempts = attempts.filter(time => now - time < LEGACY_ATTEMPT_WINDOW);
+  legacyPasswordAttempts.set(clientId, recentAttempts);
   
-  if (recentAttempts.length >= MAX_ATTEMPTS) {
+  if (recentAttempts.length >= LEGACY_MAX_ATTEMPTS) {
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
   }
   
@@ -1559,7 +1557,7 @@ function rateLimitPassword(req, res, next) {
   next();
 }
 
-app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ extended: false }), (req, res) => {
+app.post("/setup/verify-password-legacy", legacyRateLimitPassword, express.urlencoded({ extended: false }), (req, res) => {
   const submittedPassword = req.body.password || "";
   
   // Use timing-safe comparison to prevent timing attacks
@@ -1587,7 +1585,7 @@ app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ exten
 });
 
 // --- Password reset endpoints ---
-app.get("/setup/forgot-password", (req, res) => {
+app.get("/setup/forgot-password-legacy", (req, res) => {
   const message = req.query.message || "";
   const error = req.query.error || "";
   const messageBlock = message
@@ -1656,7 +1654,7 @@ app.get("/setup/forgot-password", (req, res) => {
     <p class="subtitle">Enter your email address to receive a password reset link.</p>
     ${messageBlock}
     ${errorBlock}
-    <form method="POST" action="/setup/request-reset">
+    <form method="POST" action="/setup/request-reset-legacy">
       <label for="email">Email Address</label>
       <input type="email" id="email" name="email" placeholder="your@email.com" required>
       <button type="submit">Send Reset Link</button>
@@ -1669,7 +1667,7 @@ app.get("/setup/forgot-password", (req, res) => {
 </html>`);
 });
 
-app.post("/setup/request-reset", express.urlencoded({ extended: false }), (req, res) => {
+app.post("/setup/request-reset-legacy", express.urlencoded({ extended: false }), (req, res) => {
   const email = (req.body.email || "").trim().toLowerCase();
 
   if (!email) {
@@ -1717,7 +1715,7 @@ app.post("/setup/request-reset", express.urlencoded({ extended: false }), (req, 
   res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Email service not configured. Contact your administrator."));
 });
 
-app.get("/setup/reset-password", (req, res) => {
+app.get("/setup/reset-password-legacy", (req, res) => {
   const token = (req.query.token || "").trim();
   const error = req.query.error || "";
 
@@ -1793,7 +1791,7 @@ app.get("/setup/reset-password", (req, res) => {
     <h1>Reset Password</h1>
     <p class="subtitle">Enter a new password for your OpenClaw setup.</p>
     ${errorBlock}
-    <form method="POST" action="/setup/confirm-reset">
+    <form method="POST" action="/setup/confirm-reset-legacy">
       <input type="hidden" name="token" value="${escapeHtml(token)}">
       <label for="password">New Password</label>
       <input type="password" id="password" name="password" placeholder="At least 8 characters" required>
@@ -2671,7 +2669,10 @@ app.post("/setup/reset-password", rateLimitPassword, express.urlencoded({ extend
     console.error("[reset] Failed to reset password:", err);
     // Re-render with error instead of redirecting with token in URL
     return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Failed to reset password. Please try again."));
-app.post("/setup/confirm-reset", express.urlencoded({ extended: false }), (req, res) => {
+  }
+});
+
+app.post("/setup/confirm-reset-legacy", express.urlencoded({ extended: false }), (req, res) => {
   const token = (req.body.token || "").trim();
   const password = req.body.password || "";
   const confirm = req.body.confirm || "";
