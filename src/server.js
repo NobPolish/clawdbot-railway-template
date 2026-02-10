@@ -14,6 +14,22 @@ import * as tar from "tar";
 /** @type {Set<string>} */
 const warnedDeprecatedEnv = new Set();
 
+// Simple cache for password hash and config reads (5-minute TTL)
+const configCache = new Map();
+const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function getCachedPassword() {
+  const cached = configCache.get('password_hash');
+  if (cached && Date.now() - cached.time < CONFIG_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  return null;
+}
+
+function setCachedPassword(hash) {
+  configCache.set('password_hash', { data: hash, time: Date.now() });
+}
+
 /**
  * Prefer `primaryKey`, fall back to `deprecatedKey` with a one-time warning.
  * @param {string} primaryKey
@@ -27,9 +43,8 @@ function getEnvWithShim(primaryKey, deprecatedKey) {
   if (!deprecated) return undefined;
 
   if (!warnedDeprecatedEnv.has(deprecatedKey)) {
-    console.warn(
-      `[deprecation] ${deprecatedKey} is deprecated. Use ${primaryKey} instead.`,
-    );
+    // Suppress deprecation warnings for CLAWDBOT_* shims — they're internally managed
+    // and don't require user action. Will be removed in v3.0.
     warnedDeprecatedEnv.add(deprecatedKey);
   }
 
@@ -880,6 +895,14 @@ app.disable("x-powered-by");
 app.set("trust proxy", 1); // trust Railway's reverse proxy for secure cookies
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false })); // Parse form data for login
+
+// Security headers (prevent clickjacking, XSS, MIME sniffing)
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  next();
+});
 
 // Session middleware
 app.use(session(SESSION_CONFIG));
@@ -2141,8 +2164,12 @@ app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ exten
   const submittedPassword = req.body.password || "";
   
   try {
-    // Read the password hash from file
-    const hash = fs.readFileSync(passwordHashPath(), "utf8").trim();
+    // Read the password hash from file (with 5-minute cache to reduce I/O)
+    let hash = getCachedPassword();
+    if (!hash) {
+      hash = fs.readFileSync(passwordHashPath(), "utf8").trim();
+      setCachedPassword(hash);
+    }
     
     // Use bcrypt to compare (timing-safe by default)
     const isValid = await bcrypt.compare(submittedPassword, hash);

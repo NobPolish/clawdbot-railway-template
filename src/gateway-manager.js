@@ -151,13 +151,14 @@ export class GatewayManager {
   }
 
   // -----------------------------------------------------------------------
-  // Background readiness polling — checks the gateway HTTP port every second
-  // for up to 3 minutes.  Sets this.ready = true once it responds.
+  // Background readiness polling — checks the gateway HTTP port with exponential backoff
+  // up to 3 minutes. Sets this.ready = true once it responds.
   // -----------------------------------------------------------------------
   async _pollReadiness() {
     const maxWaitMs = 180_000; // 3 minutes — generous for Railway cold starts
     const startTime = Date.now();
     const checkPaths = ["/", "/openclaw"];
+    let pollDelayMs = 100; // Start with 100ms
 
     console.log(`[GatewayManager] Polling for readiness (up to ${maxWaitMs / 1000}s)...`);
 
@@ -189,7 +190,9 @@ export class GatewayManager {
         }
       }
 
-      await this.sleep(1000);
+      // Exponential backoff: 100ms → 200ms → 400ms → 800ms → 5s (cap)
+      pollDelayMs = Math.min(pollDelayMs * 1.5, 5000);
+      await this.sleep(Math.round(pollDelayMs));
     }
 
     console.error("[GatewayManager] Gateway did not become ready within 3 minutes.");
