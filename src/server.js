@@ -4185,18 +4185,9 @@ proxy.on("error", (err, req, res) => {
   res.status(statusCode).type("html").send(errorPageHTML(statusCode, title, message, err.code));
 });
 
-app.use(async (req, res) => {
-  // If not configured, force users to /setup for any non-setup routes.
-  if (!isConfigured() && !req.path.startsWith("/setup")) {
-    return res.redirect("/setup");
-  }
-
-  if (isConfigured()) {
-    try {
-      await ensureGatewayRunning();
-    } catch (err) {
-      const errMsg = escapeHtml(String(err));
-      return res.status(503).type("html").send(`<!doctype html>
+function sendGatewayStartingPage(res, message = "Gateway is starting up") {
+  const errMsg = escapeHtml(String(message || ""));
+  res.status(503).type("html").send(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Gateway Starting - OpenClaw</title>
 <style>
@@ -4231,6 +4222,7 @@ ${errMsg ? `<div class="err">${errMsg}</div>` : ""}
 </div>
 <script>let t=5;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
 </body></html>`);
+}
 }
 
 // Proxy everything else to the gateway.
