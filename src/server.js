@@ -4223,7 +4223,6 @@ ${errMsg ? `<div class="err">${errMsg}</div>` : ""}
 <script>let t=5;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
 </body></html>`);
 }
-}
 
 // Proxy everything else to the gateway.
 const proxy = httpProxy.createProxyServer({
