@@ -1,29 +1,32 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuthContext } from '@/context/AuthContext';
 import { Button } from '@/components/Button';
 import { Input } from '@/components/Input';
 import { Card } from '@/components/Card';
 
 export default function SignupPage() {
-  const router = useRouter();
-  const { signup, isLoading, error } = useAuth();
+  const { signup, isLoading, error } = useAuthContext();
   const [formData, setFormData] = useState({ name: '', email: '', password: '', confirmPassword: '' });
   const [formError, setFormError] = useState<Record<string, string>>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const validateForm = () => {
     const errors: Record<string, string> = {};
     if (!formData.name) errors.name = 'Name is required';
-    if (!formData.email) errors.email = 'Email is required';
-    if (!formData.password) errors.password = 'Password is required';
-    if (formData.password !== formData.confirmPassword) {
-      errors.confirmPassword = 'Passwords do not match';
+    if (!formData.email) {
+      errors.email = 'Email is required';
+    } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
+      errors.email = 'Email is invalid';
     }
+    if (!formData.password) errors.password = 'Password is required';
     if (formData.password && formData.password.length < 8) {
       errors.password = 'Password must be at least 8 characters';
+    }
+    if (formData.password !== formData.confirmPassword) {
+      errors.confirmPassword = 'Passwords do not match';
     }
     return errors;
   };
@@ -32,13 +35,13 @@ export default function SignupPage() {
     e.preventDefault();
     const errors = validateForm();
     setFormError(errors);
+    setSubmitError(null);
 
     if (Object.keys(errors).length === 0) {
       try {
-        await signup({ name: formData.name, email: formData.email, password: formData.password });
-        router.push('/onboarding/welcome');
-      } catch {
-        console.error('[v0] Signup submission error');
+        await signup(formData.email, formData.password, formData.name);
+      } catch (err: any) {
+        setSubmitError(err.response?.data?.message || 'Signup failed. Please try again.');
       }
     }
   };
@@ -50,6 +53,12 @@ export default function SignupPage() {
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Join Clawdbot</h1>
           <p className="text-gray-600">Create your account to get started</p>
         </div>
+
+        {submitError && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+            {submitError}
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">

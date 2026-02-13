@@ -1,23 +1,24 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuthContext } from '@/context/AuthContext';
 import { Button } from '@/components/Button';
 import { Input } from '@/components/Input';
 import { Card } from '@/components/Card';
 
 export default function LoginPage() {
-  const router = useRouter();
-  const { login, isLoading, error } = useAuth();
+  const { login, isLoading, error } = useAuthContext();
   const [formData, setFormData] = useState({ email: '', password: '' });
   const [formError, setFormError] = useState<Record<string, string>>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const validateForm = () => {
     const errors: Record<string, string> = {};
     if (!formData.email) errors.email = 'Email is required';
+    else if (!/\S+@\S+\.\S+/.test(formData.email)) errors.email = 'Email is invalid';
     if (!formData.password) errors.password = 'Password is required';
+    if (formData.password.length < 6) errors.password = 'Password must be at least 6 characters';
     return errors;
   };
 
@@ -25,13 +26,13 @@ export default function LoginPage() {
     e.preventDefault();
     const errors = validateForm();
     setFormError(errors);
+    setSubmitError(null);
 
     if (Object.keys(errors).length === 0) {
       try {
-        await login(formData);
-        router.push('/dashboard');
-      } catch {
-        console.error('[v0] Login submission error');
+        await login(formData.email, formData.password);
+      } catch (err: any) {
+        setSubmitError(err.response?.data?.message || 'Login failed. Please try again.');
       }
     }
   };
@@ -43,6 +44,12 @@ export default function LoginPage() {
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Clawdbot</h1>
           <p className="text-gray-600">Sign in to your account</p>
         </div>
+
+        {submitError && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+            {submitError}
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">

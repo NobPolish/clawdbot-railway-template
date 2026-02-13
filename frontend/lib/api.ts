@@ -1,31 +1,81 @@
 import axios, { AxiosInstance } from 'axios';
+import { BACKEND_CONFIG } from './api-config';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-
+/**
+ * API Client for Backend Communication
+ * Handles token management, request/response interceptors, and error handling
+ */
 const apiClient: AxiosInstance = axios.create({
-  baseURL: API_URL,
-  timeout: 10000,
+  baseURL: BACKEND_CONFIG.baseURL,
+  timeout: BACKEND_CONFIG.timeout,
   headers: {
     'Content-Type': 'application/json',
   },
+  withCredentials: BACKEND_CONFIG.withCredentials,
 });
 
-// Add response interceptor for error handling
-apiClient.interceptors.response.use(
-  (response) => response,
+/**
+ * Request Interceptor
+ * Attaches authentication token to all requests
+ */
+apiClient.interceptors.request.use(
+  (config) => {
+    if (typeof window !== 'undefined') {
+      const token = localStorage.getItem('authToken');
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+        console.log('[v0] Request with token:', config.url);
+      }
+    }
+    return config;
+  },
   (error) => {
-    console.error('[v0] API Error:', error.response?.status, error.message);
+    console.error('[v0] Request error:', error);
     return Promise.reject(error);
   }
 );
 
-// Add token to requests if available
-apiClient.interceptors.request.use((config) => {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('authToken') : null;
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+/**
+ * Response Interceptor
+ * Handles responses, errors, and token refresh logic
+ */
+apiClient.interceptors.response.use(
+  (response) => {
+    console.log('[v0] Response:', response.status, response.config.url);
+    return response;
+  },
+  (error) => {
+    // Handle 401 Unauthorized - token expired or invalid
+    if (error.response?.status === 401) {
+      console.warn('[v0] Unauthorized - clearing auth');
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('authToken');
+        localStorage.removeItem('user');
+        // Redirect to login would be handled by the auth context
+        window.location.href = '/auth/login';
+      }
+    }
+
+    // Handle 403 Forbidden
+    if (error.response?.status === 403) {
+      console.warn('[v0] Forbidden - insufficient permissions');
+    }
+
+    // Handle network errors
+    if (!error.response) {
+      console.error('[v0] Network error - backend may be offline');
+    }
+
+    console.error('[v0] API Error:', {
+      status: error.response?.status,
+      message: error.message,
+      url: error.config?.url,
+      data: error.response?.data,
+    });
+
+    return Promise.reject(error);
   }
-  return config;
-});
+);
 
 export default apiClient;
+
