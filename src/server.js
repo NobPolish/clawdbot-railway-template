@@ -1370,7 +1370,8 @@ app.post("/setup/save-password", express.urlencoded({ extended: false }), (req, 
 
   try {
     savePassword(password);
-  } catch {
+  } catch (err) {
+    console.error("[setup] Error in POST /setup/save-password:", err.message);
     return res.redirect("/setup/create-password?error=" + encodeURIComponent("Failed to save password. Check server logs."));
   }
 
