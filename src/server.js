@@ -4224,24 +4224,6 @@ ${errMsg ? `<div class="err">${errMsg}</div>` : ""}
 </body></html>`);
 }
 
-// Proxy everything else to the gateway.
-const proxy = httpProxy.createProxyServer({
-  target: GATEWAY_TARGET,
-  ws: true,
-  xfwd: true,
-});
-
-// Inject the gateway token into every proxied request so the gateway
-// accepts it (auth is now "token" mode instead of the invalid "none").
-proxy.on("proxyReq", (proxyReq) => {
-  if (OPENCLAW_GATEWAY_TOKEN) {
-    proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
-  }
-});
-
-proxy.on("error", (err, _req, _res) => {
-  console.error("[proxy]", err);
-});
 
 app.use(async (req, res) => {
   // If not configured, force users to /setup for any non-setup routes.
