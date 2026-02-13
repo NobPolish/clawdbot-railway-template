@@ -1,3 +1,5 @@
+import { createSetupRequestClient } from "/setup/request-client.js";
+
 // OpenClaw Setup - Client-side logic
 // Served at /setup/app.js
 
@@ -162,6 +164,12 @@
   authChoiceEl.addEventListener('change', updateModelVisibility);
   updateModelVisibility();
 
+  var requestClient = createSetupRequestClient({
+    onAuthRequired: function () {
+      window.location.href = '/auth/login';
+    }
+  });
+
   // ======== Helpers ========
   function showLog(text) {
     logEl.textContent = text;
@@ -275,20 +283,11 @@
   }
 
   function httpJson(url, opts) {
-    opts = opts || {};
-    opts.credentials = 'same-origin';
-    return fetch(url, opts).then(function (res) {
-      if (res.status === 401) {
-        window.location.href = '/auth/login';
-        return new Promise(function () {});
-      }
-      if (!res.ok) {
-        return res.text().then(function (t) {
-          throw new Error('HTTP ' + res.status + ': ' + (t || res.statusText));
-        });
-      }
-      return res.json();
-    });
+    return requestClient.requestJson(url, opts || {});
+  }
+
+  function httpText(url, opts) {
+    return requestClient.requestText(url, opts || {});
   }
 
   // ======== Status ========
@@ -334,14 +333,11 @@
 
     showLog('Deploying configuration...\n');
 
-    fetch('/setup/api/run', {
+    httpText('/setup/api/run', {
       method: 'POST',
-      credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).then(function (res) {
-      if (res.status === 401) { window.location.href = '/auth/login'; return new Promise(function () {}); }
-      return res.text();
+      body: JSON.stringify(payload),
+      maxRetries: 0
     }).then(function (text) {
       var j;
       try { j = JSON.parse(text); } catch (_e) { j = { ok: false, output: text }; }
@@ -364,8 +360,7 @@
   document.getElementById('reset').addEventListener('click', function () {
     if (!confirm('Reset configuration? This deletes the config file so setup can run again.')) return;
     showLog('Resetting...\n');
-    fetch('/setup/api/reset', { method: 'POST', credentials: 'same-origin' })
-      .then(function (res) { if (res.status === 401) { window.location.href = '/auth/login'; return new Promise(function () {}); } return res.text(); })
+    httpText('/setup/api/reset', { method: 'POST', maxRetries: 0 })
       .then(function (t) {
         appendLog(t + '\n');
         toast('Configuration reset', 'info');
@@ -457,21 +452,17 @@
     if (importOutEl) { importOutEl.textContent = 'Uploading...\n'; importOutEl.classList.add('visible'); }
 
     return f.arrayBuffer().then(function (buf) {
-      return fetch('/setup/import', {
+      return httpText('/setup/import', {
         method: 'POST',
-        credentials: 'same-origin',
         headers: { 'content-type': 'application/gzip' },
-        body: buf
+        body: buf,
+        maxRetries: 0,
+        timeoutMs: 60000
       });
-    }).then(function (res) {
-      return res.text().then(function (t) {
-        if (importOutEl) importOutEl.textContent += t + '\n';
-        if (!res.ok) {
-          throw new Error('HTTP ' + res.status + ': ' + (t || res.statusText));
-        }
-        toast('Backup imported successfully', 'success');
-        return refreshStatus();
-      });
+    }).then(function (t) {
+      if (importOutEl) importOutEl.textContent += t + '\n';
+      toast('Backup imported successfully', 'success');
+      return refreshStatus();
     }).catch(function (e) {
       if (importOutEl) importOutEl.textContent += '\nError: ' + String(e) + '\n';
       toast('Import failed', 'error');
@@ -496,13 +487,12 @@
       var code = prompt('Pairing code:');
       if (!code) return;
       showLog('Approving pairing for ' + channel + '...\n');
-      fetch('/setup/api/pairing/approve', {
+      httpText('/setup/api/pairing/approve', {
         method: 'POST',
-        credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ channel: channel, code: code.trim() })
-      }).then(function (r) { return r.text(); })
-        .then(function (t) {
+        body: JSON.stringify({ channel: channel, code: code.trim() }),
+        maxRetries: 0
+      }).then(function (t) {
           appendLog(t + '\n');
           toast('Pairing approved', 'success');
         })
