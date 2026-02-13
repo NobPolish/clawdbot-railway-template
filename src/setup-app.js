@@ -1,3 +1,6 @@
+import { createSetupRequestClient, SetupRequestError } from "/setup/request-client.js";
+import { createErrorBannerController } from "/setup/error-boundary.js";
+
 // OpenClaw Setup - Client-side logic
 // Served at /setup/app.js
 
@@ -138,6 +141,9 @@
   var previewGalleryLinkEl = document.getElementById('previewGalleryLink');
   var previewFramesLinkEl = document.getElementById('previewFramesLink');
 
+  var pageRoot = document.querySelector('main') || document.body;
+  var errorBoundary = createErrorBannerController({ root: pageRoot });
+
   // ======== Model field visibility ========
   var providersWithModel = {
     'openrouter-api-key': { placeholder: 'anthropic/claude-sonnet-4', hint: 'OpenRouter: <code>provider/model-name</code>' },
@@ -161,6 +167,49 @@
 
   authChoiceEl.addEventListener('change', updateModelVisibility);
   updateModelVisibility();
+
+  var requestClient = createSetupRequestClient({
+    onAuthRequired: function () {
+      window.location.href = '/auth/login';
+    }
+  });
+
+  function findSectionFromElement(el) {
+    return el ? el.closest('.card') : null;
+  }
+
+  function toErrorString(err) {
+    return err && err.message ? err.message : String(err);
+  }
+
+  function runInSectionBoundary(task, opts) {
+    opts = opts || {};
+    return Promise.resolve()
+      .then(task)
+      .catch(function (err) {
+        var sectionEl = opts.sectionEl || null;
+        if (sectionEl) errorBoundary.markSectionBoundary(sectionEl, true);
+
+        errorBoundary.showForError(err, { sectionLabel: opts.sectionLabel || 'this section' }, {
+          onAction: function () {
+            errorBoundary.hideBanner();
+            if (sectionEl) errorBoundary.markSectionBoundary(sectionEl, false);
+            if (typeof opts.onRetry === 'function') opts.onRetry();
+          }
+        });
+
+        if (typeof opts.onError === 'function') opts.onError(err);
+        throw err;
+      });
+  }
+
+  window.addEventListener('error', function (event) {
+    errorBoundary.showForError(event.error || new Error(event.message || 'Unexpected error'), { sectionLabel: 'the setup page' });
+  });
+
+  window.addEventListener('unhandledrejection', function (event) {
+    errorBoundary.showForError(event.reason || new Error('Unhandled async error'), { sectionLabel: 'the setup page' });
+  });
 
   // ======== Helpers ========
   function showLog(text) {
@@ -230,7 +279,7 @@
         setPreviewButton(Boolean(j.enabled));
         toast('Preview Mode ' + (j.enabled ? 'enabled' : 'disabled'), 'info');
       }).catch(function (e) {
-        toast('Failed to toggle Preview Mode: ' + String(e), 'error');
+        toast('Failed to toggle Preview Mode: ' + toErrorString(e), 'error');
       });
     });
 
@@ -245,7 +294,7 @@
             }
           })
           .catch(function (err) {
-            toast('Screenshot capture failed: ' + String(err), 'error');
+            toast('Screenshot capture failed: ' + toErrorString(err), 'error');
           })
           .finally(function () {
             setLoading(previewCaptureEl, false);
@@ -268,27 +317,18 @@
           toast('Screenshot captured', 'success');
           if (j && j.url) window.open(j.url, '_blank');
         }).catch(function (err) {
-          toast('Screenshot capture failed: ' + String(err), 'error');
+          toast('Screenshot capture failed: ' + toErrorString(err), 'error');
         });
       }
     });
   }
 
   function httpJson(url, opts) {
-    opts = opts || {};
-    opts.credentials = 'same-origin';
-    return fetch(url, opts).then(function (res) {
-      if (res.status === 401) {
-        window.location.href = '/auth/login';
-        return new Promise(function () {});
-      }
-      if (!res.ok) {
-        return res.text().then(function (t) {
-          throw new Error('HTTP ' + res.status + ': ' + (t || res.statusText));
-        });
-      }
-      return res.json();
-    });
+    return requestClient.requestJson(url, opts || {});
+  }
+
+  function httpText(url, opts) {
+    return requestClient.requestText(url, opts || {});
   }
 
   // ======== Status ========
@@ -302,6 +342,9 @@
       } else {
         setStatus('Not configured', 'err');
       }
+      errorBoundary.hideBanner();
+      errorBoundary.setSafeMode(false);
+      errorBoundary.markSectionBoundary(null, false);
       loadConfigRaw();
     }).catch(function (e) {
       setStatus('Connection error', 'err');
@@ -334,14 +377,17 @@
 
     showLog('Deploying configuration...\n');
 
-    fetch('/setup/api/run', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).then(function (res) {
-      if (res.status === 401) { window.location.href = '/auth/login'; return new Promise(function () {}); }
-      return res.text();
+    runInSectionBoundary(function () {
+      return httpText('/setup/api/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        maxRetries: 0
+      });
+    }, {
+      sectionEl: findSectionFromElement(runBtn),
+      sectionLabel: 'setup deployment',
+      onRetry: function () { runBtn.click(); }
     }).then(function (text) {
       var j;
       try { j = JSON.parse(text); } catch (_e) { j = { ok: false, output: text }; }
@@ -353,8 +399,8 @@
       }
       return refreshStatus();
     }).catch(function (e) {
-      appendLog('\nError: ' + String(e) + '\n');
-      toast('Deployment failed: ' + String(e), 'error');
+      appendLog('\nError: ' + toErrorString(e) + '\n');
+      toast('Deployment failed: ' + toErrorString(e), 'error');
     }).finally(function () {
       setLoading(runBtn, false);
     });
@@ -364,15 +410,19 @@
   document.getElementById('reset').addEventListener('click', function () {
     if (!confirm('Reset configuration? This deletes the config file so setup can run again.')) return;
     showLog('Resetting...\n');
-    fetch('/setup/api/reset', { method: 'POST', credentials: 'same-origin' })
-      .then(function (res) { if (res.status === 401) { window.location.href = '/auth/login'; return new Promise(function () {}); } return res.text(); })
-      .then(function (t) {
+    runInSectionBoundary(function () {
+      return httpText('/setup/api/reset', { method: 'POST', maxRetries: 0 });
+    }, {
+      sectionEl: findSectionFromElement(document.getElementById('reset')),
+      sectionLabel: 'configuration reset',
+      onRetry: function () { document.getElementById('reset').click(); }
+    }).then(function (t) {
         appendLog(t + '\n');
         toast('Configuration reset', 'info');
         return refreshStatus();
       })
       .catch(function (e) {
-        appendLog('Error: ' + String(e) + '\n');
+        appendLog('Error: ' + toErrorString(e) + '\n');
         toast('Reset failed', 'error');
       });
   });
@@ -386,16 +436,22 @@
     setLoading(consoleRunEl, true);
     if (consoleOutEl) { consoleOutEl.textContent = 'Running ' + cmd + '...\n'; consoleOutEl.classList.add('visible'); }
 
-    return httpJson('/setup/api/console/run', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ cmd: cmd, arg: arg })
+    return runInSectionBoundary(function () {
+      return httpJson('/setup/api/console/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cmd: cmd, arg: arg })
+      });
+    }, {
+      sectionEl: findSectionFromElement(consoleRunEl),
+      sectionLabel: 'debug console',
+      onRetry: runConsole
     }).then(function (j) {
       if (consoleOutEl) consoleOutEl.textContent = (j.output || JSON.stringify(j, null, 2));
       toast('Command completed', 'success');
       return refreshStatus();
     }).catch(function (e) {
-      if (consoleOutEl) consoleOutEl.textContent += '\nError: ' + String(e) + '\n';
+      if (consoleOutEl) consoleOutEl.textContent += '\nError: ' + toErrorString(e) + '\n';
       toast('Command failed', 'error');
     }).finally(function () {
       setLoading(consoleRunEl, false);
@@ -425,17 +481,23 @@
     setLoading(configSaveEl, true);
     if (configOutEl) { configOutEl.textContent = 'Saving...\n'; configOutEl.classList.add('visible'); }
 
-    return httpJson('/setup/api/config/raw', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content: configTextEl.value })
+    return runInSectionBoundary(function () {
+      return httpJson('/setup/api/config/raw', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: configTextEl.value })
+      });
+    }, {
+      sectionEl: findSectionFromElement(configSaveEl),
+      sectionLabel: 'config editor',
+      onRetry: saveConfigRaw
     }).then(function () {
       if (configOutEl) configOutEl.textContent = 'Saved. Gateway restarting...\n';
       toast('Configuration saved', 'success');
       return refreshStatus();
     }).catch(function (e) {
-      if (configOutEl) configOutEl.textContent += '\nError: ' + String(e) + '\n';
-      toast('Save failed: ' + String(e), 'error');
+      if (configOutEl) configOutEl.textContent += '\nError: ' + toErrorString(e) + '\n';
+      toast('Save failed: ' + toErrorString(e), 'error');
     }).finally(function () {
       setLoading(configSaveEl, false);
     });
@@ -457,23 +519,25 @@
     if (importOutEl) { importOutEl.textContent = 'Uploading...\n'; importOutEl.classList.add('visible'); }
 
     return f.arrayBuffer().then(function (buf) {
-      return fetch('/setup/import', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/gzip' },
-        body: buf
+      return runInSectionBoundary(function () {
+        return httpText('/setup/import', {
+          method: 'POST',
+          headers: { 'content-type': 'application/gzip' },
+          body: buf,
+          maxRetries: 0,
+          timeoutMs: 60000
+        });
+      }, {
+        sectionEl: findSectionFromElement(importRunEl),
+        sectionLabel: 'backup import',
+        onRetry: runImport
       });
-    }).then(function (res) {
-      return res.text().then(function (t) {
-        if (importOutEl) importOutEl.textContent += t + '\n';
-        if (!res.ok) {
-          throw new Error('HTTP ' + res.status + ': ' + (t || res.statusText));
-        }
-        toast('Backup imported successfully', 'success');
-        return refreshStatus();
-      });
+    }).then(function (t) {
+      if (importOutEl) importOutEl.textContent += t + '\n';
+      toast('Backup imported successfully', 'success');
+      return refreshStatus();
     }).catch(function (e) {
-      if (importOutEl) importOutEl.textContent += '\nError: ' + String(e) + '\n';
+      if (importOutEl) importOutEl.textContent += '\nError: ' + toErrorString(e) + '\n';
       toast('Import failed', 'error');
     }).finally(function () {
       setLoading(importRunEl, false);
@@ -496,18 +560,23 @@
       var code = prompt('Pairing code:');
       if (!code) return;
       showLog('Approving pairing for ' + channel + '...\n');
-      fetch('/setup/api/pairing/approve', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ channel: channel, code: code.trim() })
-      }).then(function (r) { return r.text(); })
-        .then(function (t) {
+      runInSectionBoundary(function () {
+        return httpText('/setup/api/pairing/approve', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ channel: channel, code: code.trim() }),
+          maxRetries: 0
+        });
+      }, {
+        sectionEl: findSectionFromElement(pairingBtn),
+        sectionLabel: 'device pairing',
+        onRetry: function () { pairingBtn.click(); }
+      }).then(function (t) {
           appendLog(t + '\n');
           toast('Pairing approved', 'success');
         })
         .catch(function (e) {
-          appendLog('Error: ' + String(e) + '\n');
+          appendLog('Error: ' + toErrorString(e) + '\n');
           toast('Pairing failed', 'error');
         });
     });
@@ -532,6 +601,10 @@
   }
 
   // ======== Init ========
+  [runBtn, document.getElementById('reset'), configSaveEl, importRunEl, pairingBtn].forEach(function (el) {
+    if (el) el.setAttribute('data-safe-mode-lock', 'true');
+  });
+
   initPreviewMode();
   refreshStatus();
 })();

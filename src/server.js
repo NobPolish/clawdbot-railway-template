@@ -22,10 +22,57 @@ const PORT = Number.parseInt(
 
 // State/workspace
 // OpenClaw defaults to ~/.openclaw. Keep CLAWDBOT_* as backward-compat aliases.
-const STATE_DIR =
-  process.env.OPENCLAW_STATE_DIR?.trim() ||
-  process.env.CLAWDBOT_STATE_DIR?.trim() ||
-  path.join(os.homedir(), ".openclaw");
+function probeStateDir(dirPath) {
+  const probeFile = path.join(dirPath, `.state-write-test-${process.pid}-${Date.now()}`);
+  try {
+    fs.mkdirSync(dirPath, { recursive: true });
+    fs.writeFileSync(probeFile, "ok", { encoding: "utf8", mode: 0o600 });
+    fs.unlinkSync(probeFile);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: err?.code ? `${err.code}` : String(err?.message || err) };
+  }
+}
+
+function resolveStateDir() {
+  const configuredStateDir = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim() || "";
+  const strictConfiguredStateDir = process.env.OPENCLAW_STATE_DIR_STRICT === "true";
+  const candidates = [
+    configuredStateDir,
+    "/data/.openclaw",
+    path.join(os.homedir(), ".openclaw"),
+    path.join(os.tmpdir(), ".openclaw"),
+  ].filter(Boolean);
+
+  const attempted = [];
+  const failures = [];
+
+  for (const candidate of candidates) {
+    if (attempted.includes(candidate)) continue;
+    attempted.push(candidate);
+
+    const result = probeStateDir(candidate);
+    if (result.ok) {
+      if (configuredStateDir && configuredStateDir !== candidate) {
+        console.warn(`[setup] State dir ${configuredStateDir} is not writable. Falling back to ${candidate}.`);
+      }
+      if (candidate.startsWith(os.tmpdir())) {
+        console.warn(`[setup] Using temporary state directory (${candidate}). Data may be lost after restart.`);
+      }
+      return candidate;
+    }
+
+    failures.push(`${candidate} (${result.reason})`);
+
+    if (strictConfiguredStateDir && candidate === configuredStateDir) {
+      throw new Error(`[setup] Configured state dir is not writable: ${candidate} (${result.reason}). Strict mode is enabled.`);
+    }
+  }
+
+  throw new Error(`[setup] No writable state directory found. Tried: ${failures.join(", ")}`);
+}
+
+const STATE_DIR = resolveStateDir();
 
 const WORKSPACE_DIR =
   process.env.OPENCLAW_WORKSPACE_DIR?.trim() ||
@@ -979,8 +1026,10 @@ app.post("/setup/save-password", express.urlencoded({ extended: false }), (req, 
 
   try {
     savePassword(password);
-  } catch {
-    return res.redirect("/setup/create-password?error=" + encodeURIComponent("Failed to save password. Check server logs."));
+  } catch (err) {
+    const reason = err && typeof err === "object" && "code" in err ? ` (${err.code})` : "";
+    const message = `Failed to save password${reason}. Verify OPENCLAW_STATE_DIR (${STATE_DIR}) is writable.`;
+    return res.redirect("/setup/create-password?error=" + encodeURIComponent(message));
   }
 
   // Automatically mark session as verified so user doesn't have to re-enter
@@ -1654,6 +1703,21 @@ app.use("/setup", requireSetupPassword);
 // Apply auth to all routes below
 app.use(requireAuth);
 
+app.get("/setup/request-client.js", (_req, res) => {
+  res.type("application/javascript");
+  res.send(fs.readFileSync(path.join(process.cwd(), "src", "setup-request-client.js"), "utf8"));
+});
+
+app.get("/setup/setup-request-client.js", (_req, res) => {
+  res.type("application/javascript");
+  res.send(fs.readFileSync(path.join(process.cwd(), "src", "setup-request-client.js"), "utf8"));
+});
+
+app.get("/setup/error-boundary.js", (_req, res) => {
+  res.type("application/javascript");
+  res.send(fs.readFileSync(path.join(process.cwd(), "src", "setup-error-boundary.js"), "utf8"));
+});
+
 app.get("/setup/app.js", (_req, res) => {
   // Serve JS for /setup (kept external to avoid inline encoding/template issues)
   res.type("application/javascript");
@@ -2256,7 +2320,7 @@ app.get("/setup", (req, res) => {
   </main>
 
   <script>window.__OPENCLAW_DEV_FEATURES_ALLOWED__ = ${DEV_FEATURES_ALLOWED ? "true" : "false"};</script>
-  <script src="/setup/app.js"></script>
+  <script type="module" src="/setup/app.js"></script>
 </body>
 </html>`);
 });
