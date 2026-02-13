@@ -848,8 +848,10 @@ function requireAuth(req, res, next) {
     return next();
   }
 
-  // Check if user is authenticated via password
-  if (req.session?.setupPasswordVerified) {
+  // Check if user is authenticated.
+  // - setupPasswordVerified is set by /setup password prompt flow
+  // - user is set by /auth/login username/password flow
+  if (req.session?.setupPasswordVerified || req.session?.user) {
     return next();
   }
 
