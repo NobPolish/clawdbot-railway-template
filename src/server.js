@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 
 import express from "express";
 import session from "express-session";
@@ -46,12 +47,62 @@ const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || "")
 // Returns the env var, a previously-saved password, or null (first run).
 const PASSWORD_PATH = path.join(STATE_DIR, "setup.password");
 const PASSWORD_RESET_TOKENS_PATH = path.join(STATE_DIR, "reset-tokens.json");
+const PASSWORD_HASH_SCHEME = "scrypt";
+
+function hashToken(token) {
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const digest = crypto.scryptSync(String(password), salt, 64).toString("hex");
+  return `${PASSWORD_HASH_SCHEME}$${salt}$${digest}`;
+}
+
+function verifyPassword(submittedPassword, storedValue) {
+  const submitted = String(submittedPassword ?? "");
+  const stored = String(storedValue ?? "");
+
+  if (stored.startsWith(`${PASSWORD_HASH_SCHEME}$`)) {
+    const parts = stored.split("$");
+    if (parts.length !== 3) return false;
+    const salt = parts[1];
+    const expectedBuffer = Buffer.from(parts[2], "hex");
+    const submittedBuffer = crypto.scryptSync(submitted, salt, expectedBuffer.length);
+    return crypto.timingSafeEqual(submittedBuffer, expectedBuffer);
+  }
+
+  const submittedBuffer = Buffer.from(submitted);
+  const expectedBuffer = Buffer.from(stored);
+  if (submittedBuffer.length !== expectedBuffer.length) return false;
+  return crypto.timingSafeEqual(submittedBuffer, expectedBuffer);
+}
+
+function isLegacyPlaintextPassword(value) {
+  return Boolean(value) && !String(value).startsWith(`${PASSWORD_HASH_SCHEME}$`);
+}
+
+function pruneExpiredResetTokens(tokens) {
+  const now = Date.now();
+  let dirty = false;
+  for (const [tokenHash, tokenData] of Object.entries(tokens || {})) {
+    if (!tokenData || tokenData.expiresAt < now) {
+      delete tokens[tokenHash];
+      dirty = true;
+    }
+  }
+  return dirty;
+}
 
 // Load existing reset tokens from file
 function loadResetTokens() {
   try {
     const data = fs.readFileSync(PASSWORD_RESET_TOKENS_PATH, "utf8");
-    return JSON.parse(data) || {};
+    const tokens = JSON.parse(data) || {};
+    if (pruneExpiredResetTokens(tokens)) {
+      saveResetTokens(tokens);
+    }
+    return tokens;
   } catch {
     return {};
   }
@@ -60,6 +111,7 @@ function loadResetTokens() {
 // Save reset tokens to file
 function saveResetTokens(tokens) {
   try {
+    pruneExpiredResetTokens(tokens);
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.writeFileSync(PASSWORD_RESET_TOKENS_PATH, JSON.stringify(tokens, null, 2), {
       encoding: "utf8",
@@ -112,14 +164,15 @@ function isPasswordConfigured() {
 }
 
 function savePassword(password) {
+  const hashedPassword = hashPassword(password);
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
-    fs.writeFileSync(PASSWORD_PATH, password, { encoding: "utf8", mode: 0o600 });
+    fs.writeFileSync(PASSWORD_PATH, hashedPassword, { encoding: "utf8", mode: 0o600 });
   } catch (err) {
     console.error("[setup] Failed to save password:", err);
     throw err;
   }
-  SETUP_PASSWORD = password;
+  SETUP_PASSWORD = hashedPassword;
 }
 
 // Session secret: reuse a persisted value for stability across restarts.
@@ -497,6 +550,23 @@ app.use(express.json({ limit: "1mb" }));
 
 // Session middleware
 app.use(session(SESSION_CONFIG));
+
+const DEV_FEATURES_ALLOWED =
+  process.env.OPENCLAW_DEV_FEATURES === "true" ||
+  process.env.OPENCLAW_ENABLE_UI_PREVIEW === "true" ||
+  process.env.NODE_ENV !== "production";
+
+function isDevPreviewModeEnabled(req) {
+  if (!DEV_FEATURES_ALLOWED) return false;
+  return req.session?.devPreviewMode === true;
+}
+
+function requireDevFeatures(req, res, next) {
+  if (!DEV_FEATURES_ALLOWED) {
+    return res.status(404).type("text/plain").send("Dev-only feature is disabled.\n");
+  }
+  return next();
+}
 
 // ---------- Auth routes ----------
 
@@ -1074,24 +1144,37 @@ app.get("/setup/password-prompt", (req, res) => {
 const passwordAttempts = new Map();
 const MAX_ATTEMPTS = 5;
 const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const PASSWORD_ATTEMPT_MAX_CLIENTS = 5000;
 
 function rateLimitPassword(req, res, next) {
   const clientId = req.ip || req.connection.remoteAddress || "unknown";
   const now = Date.now();
-  
+
+  // Opportunistic cleanup to bound in-memory growth over time.
+  if (passwordAttempts.size > PASSWORD_ATTEMPT_MAX_CLIENTS) {
+    for (const [id, attemptList] of passwordAttempts.entries()) {
+      const recent = attemptList.filter((time) => now - time < ATTEMPT_WINDOW);
+      if (recent.length === 0) {
+        passwordAttempts.delete(id);
+      } else {
+        passwordAttempts.set(id, recent);
+      }
+    }
+  }
+
   if (!passwordAttempts.has(clientId)) {
     passwordAttempts.set(clientId, []);
   }
-  
+
   const attempts = passwordAttempts.get(clientId);
   // Remove old attempts outside the window
-  const recentAttempts = attempts.filter(time => now - time < ATTEMPT_WINDOW);
+  const recentAttempts = attempts.filter((time) => now - time < ATTEMPT_WINDOW);
   passwordAttempts.set(clientId, recentAttempts);
-  
+
   if (recentAttempts.length >= MAX_ATTEMPTS) {
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
   }
-  
+
   // Record this attempt
   recentAttempts.push(now);
   next();
@@ -1099,18 +1182,19 @@ function rateLimitPassword(req, res, next) {
 
 app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ extended: false }), (req, res) => {
   const submittedPassword = req.body.password || "";
-  
-  // Use timing-safe comparison to prevent timing attacks
-  const passwordBuffer = Buffer.from(submittedPassword);
-  const expectedBuffer = Buffer.from(SETUP_PASSWORD);
-  
-  // Ensure buffers are the same length before comparison
-  if (passwordBuffer.length !== expectedBuffer.length) {
-    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Incorrect password"));
-  }
-  
+
   try {
-    if (crypto.timingSafeEqual(passwordBuffer, expectedBuffer)) {
+    if (verifyPassword(submittedPassword, SETUP_PASSWORD)) {
+      // Lazy-migrate legacy plaintext values after first successful login.
+      if (isLegacyPlaintextPassword(SETUP_PASSWORD)) {
+        try {
+          savePassword(submittedPassword);
+          console.log("[setup] Migrated setup password from legacy plaintext format to hashed format");
+        } catch (migrateErr) {
+          console.error("[setup] Password migration failed:", migrateErr);
+        }
+      }
+
       req.session.setupPasswordVerified = true;
       req.session.save(() => {
         res.redirect("/setup");
@@ -1215,16 +1299,15 @@ app.post("/setup/request-reset", express.urlencoded({ extended: false }), (req, 
 
   // Generate a reset token
   const token = crypto.randomBytes(32).toString("hex");
+  const tokenHash = hashToken(token);
   const expiresAt = Date.now() + 3600000; // 1 hour
 
-  // Store the token
-  resetTokens[token] = { email, expiresAt };
+  // Store only a token hash on disk.
+  resetTokens[tokenHash] = { email, expiresAt };
   saveResetTokens(resetTokens);
 
   // Generate reset URL
   const resetUrl = `${getBaseUrl(req)}/setup/reset-password?token=${encodeURIComponent(token)}`;
-  const resetMessage = `Password reset link: ${resetUrl}`;
-
   // Send via webhook if configured
   if (emailConfig.webhookUrl) {
     fetch(emailConfig.webhookUrl, {
@@ -1256,16 +1339,17 @@ app.post("/setup/request-reset", express.urlencoded({ extended: false }), (req, 
 
 app.get("/setup/reset-password", (req, res) => {
   const token = (req.query.token || "").trim();
+  const tokenHash = hashToken(token);
   const error = req.query.error || "";
 
   if (!token) {
     return res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Invalid or missing reset token"));
   }
 
-  const resetData = resetTokens[token];
+  const resetData = resetTokens[tokenHash];
   if (!resetData || resetData.expiresAt < Date.now()) {
     // Clean up expired token
-    if (resetData) delete resetTokens[token];
+    if (resetData) delete resetTokens[tokenHash];
     saveResetTokens(resetTokens);
     return res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Reset link has expired. Please request a new one."));
   }
@@ -1347,11 +1431,16 @@ app.get("/setup/reset-password", (req, res) => {
 
 app.post("/setup/confirm-reset", express.urlencoded({ extended: false }), (req, res) => {
   const token = (req.body.token || "").trim();
+  const tokenHash = hashToken(token);
   const password = req.body.password || "";
   const confirm = req.body.confirm || "";
 
-  const resetData = resetTokens[token];
+  const resetData = resetTokens[tokenHash];
   if (!resetData || resetData.expiresAt < Date.now()) {
+    if (resetData) {
+      delete resetTokens[tokenHash];
+      saveResetTokens(resetTokens);
+    }
     return res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Reset link has expired"));
   }
 
@@ -1366,7 +1455,7 @@ app.post("/setup/confirm-reset", express.urlencoded({ extended: false }), (req, 
   try {
     savePassword(password);
     // Clean up the token after use
-    delete resetTokens[token];
+    delete resetTokens[tokenHash];
     saveResetTokens(resetTokens);
 
     res.redirect("/setup/password-prompt?message=" + encodeURIComponent("Password reset successfully. Please log in with your new password."));
@@ -1378,6 +1467,186 @@ app.post("/setup/confirm-reset", express.urlencoded({ extended: false }), (req, 
 
 // Minimal health endpoint for Railway - must be public
 app.get("/setup/healthz", (_req, res) => res.json({ ok: true }));
+
+// Optional visual preview route for local/staging UX review.
+const DEV_SETUP_ROUTES = [
+  { title: "Create Password", path: "/setup/create-password" },
+  { title: "Password Prompt", path: "/setup/password-prompt" },
+  { title: "Forgot Password", path: "/setup/forgot-password" },
+  { title: "Reset Password", path: "/setup/reset-password?token=preview-token" },
+  { title: "Setup Dashboard", path: "/setup" },
+  { title: "Auth Login", path: "/auth/login" },
+];
+
+app.get("/setup/preview", requireDevFeatures, (req, res) => {
+  if (!isDevPreviewModeEnabled(req)) {
+    return res.status(403).type("text/plain").send("Preview Mode is OFF. Toggle it ON in /setup first.\n");
+  }
+
+  const baseUrl = getBaseUrl(req);
+  const frameHtml = DEV_SETUP_ROUTES
+    .map(({ title, path: framePath }) => `
+      <section class="card">
+        <h2>${escapeHtml(title)}</h2>
+        <p><code>${escapeHtml(framePath)}</code></p>
+        <iframe src="${escapeHtml(framePath)}" title="${escapeHtml(title)}"></iframe>
+      </section>
+    `)
+    .join("\n");
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenClaw Setup UI Preview</title>
+  <style>
+    :root { --bg:#0b0b10; --surface:#16161d; --border:#2a2a35; --text:#f4f4f5; --dim:#a1a1aa; --accent:#3b82f6; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--text); padding:24px; }
+    h1 { margin:0 0 8px; font-size:1.5rem; }
+    .subtitle,.meta { margin:0 0 16px; color:var(--dim); }
+    .actions { display:flex; gap:10px; margin:0 0 16px; }
+    .btn { border:1px solid var(--border); background:#232334; color:var(--text); border-radius:8px; padding:8px 12px; text-decoration:none; cursor:pointer; }
+    .btn:hover { border-color:#3b82f6; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:16px; }
+    .card { border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:12px; }
+    .card h2 { margin:0 0 6px; font-size:1rem; }
+    .card p { margin:0 0 8px; color:var(--dim); font-size:0.85rem; }
+    code { background:#222230; border:1px solid #32324a; border-radius:6px; padding:2px 6px; color:#c7d2fe; }
+    iframe { width:100%; height:760px; border:1px solid var(--border); border-radius:8px; background:#09090b; }
+  </style>
+</head>
+<body>
+  <h1>Setup UI Preview</h1>
+  <p class="subtitle">Visual review page for setup/auth routes.</p>
+  <p class="meta">Base URL: <code>${escapeHtml(baseUrl)}</code></p>
+  <div class="actions">
+    <a class="btn" href="/setup/gallery">Open Gallery</a>
+    <a class="btn" href="/setup">Back to Setup</a>
+  </div>
+  <div class="grid">${frameHtml}</div>
+</body>
+</html>`);
+});
+
+app.get("/setup/gallery", requireDevFeatures, (req, res) => {
+  if (!isDevPreviewModeEnabled(req)) {
+    return res.status(403).type("text/plain").send("Preview Mode is OFF. Toggle it ON in /setup first.\n");
+  }
+  const cards = DEV_SETUP_ROUTES
+    .map(({ title, path: routePath }) => `
+      <article class="card">
+        <h3>${escapeHtml(title)}</h3>
+        <p><code>${escapeHtml(routePath)}</code></p>
+        <div class="actions">
+          <a class="btn" href="${escapeHtml(routePath)}" target="_blank">Open Route</a>
+          <a class="btn" href="/setup/api/dev/screenshot?path=${encodeURIComponent(routePath)}" target="_blank">Capture PNG</a>
+        </div>
+      </article>
+    `)
+    .join("\n");
+
+  res.type("html").send(`<!doctype html><html lang="en"><head>
+  <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Setup Route Gallery</title>
+  <style>
+    body{margin:0;padding:24px;background:#0b0b10;color:#f4f4f5;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+    .card{border:1px solid #2a2a35;border-radius:10px;padding:12px;background:#16161d}
+    h1{margin:0 0 12px}.card h3{margin:0 0 6px;font-size:1rem}.card p{margin:0 0 8px;color:#a1a1aa}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid #2a2a35;border-radius:8px;padding:6px 10px;text-decoration:none;color:#f4f4f5;background:#232334}
+    code{background:#222230;border:1px solid #32324a;border-radius:6px;padding:2px 6px;color:#c7d2fe}
+  </style></head><body>
+  <h1>Setup/Auth Route Gallery</h1>
+  <p><a class="btn" href="/setup/preview">Back to iframe preview</a> <a class="btn" href="/setup">Back to setup</a></p>
+  <section class="grid">${cards}</section>
+  </body></html>`);
+});
+
+app.get("/setup/api/dev/preview-mode", requireDevFeatures, (req, res) => {
+  res.json({ ok: true, enabled: isDevPreviewModeEnabled(req), allowed: DEV_FEATURES_ALLOWED });
+});
+
+app.post("/setup/api/dev/preview-mode", requireDevFeatures, (req, res) => {
+  const enabled = Boolean(req.body?.enabled);
+  req.session.devPreviewMode = enabled;
+  req.session.save(() => {
+    res.json({ ok: true, enabled: req.session.devPreviewMode === true });
+  });
+});
+
+app.get("/setup/api/dev/screenshot", requireDevFeatures, async (req, res) => {
+  if (!isDevPreviewModeEnabled(req)) {
+    return res.status(403).json({ ok: false, error: "Preview Mode is OFF" });
+  }
+
+  const routePath = String(req.query.path || "/setup");
+  const allowedPaths = new Set(DEV_SETUP_ROUTES.map((r) => r.path));
+  if (!allowedPaths.has(routePath)) {
+    return res.status(400).json({ ok: false, error: "Route not in dev gallery allowlist" });
+  }
+
+  const screenshotDir = path.join(STATE_DIR, "dev-screenshots");
+  fs.mkdirSync(screenshotDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeName = routePath.replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "").slice(0, 80) || "route";
+  const filePath = path.join(screenshotDir, `${safeName}-${stamp}.png`);
+  const targetUrl = `${getBaseUrl(req)}${routePath}`;
+
+  const captureScript = `
+import { chromium } from "playwright";
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage({ viewport: { width: 1440, height: 1200 } });
+await page.goto(${JSON.stringify(targetUrl)}, { waitUntil: "networkidle" });
+await page.screenshot({ path: ${JSON.stringify(filePath)}, fullPage: true });
+await browser.close();
+`;
+
+  const runNode = await runCmd("node", ["--input-type=module", "-e", captureScript], { timeoutMs: 120_000 });
+  if (runNode.code !== 0) {
+    const pyScript = [
+      "from playwright.sync_api import sync_playwright",
+      "with sync_playwright() as p:",
+      "    browser = p.firefox.launch()",
+      "    page = browser.new_page(viewport={'width':1440,'height':1200})",
+      `    page.goto(${JSON.stringify(targetUrl)}, wait_until='networkidle')`,
+      `    page.screenshot(path=${JSON.stringify(filePath)}, full_page=True)`,
+      "    browser.close()",
+    ].join("\n");
+
+    const runPython = await runCmd("python3", ["-c", pyScript], { timeoutMs: 120_000 });
+    if (runPython.code !== 0) {
+      return res.status(500).json({
+        ok: false,
+        error: "Screenshot capture failed. Install node playwright or python playwright in this environment.",
+        output: { node: runNode.output, python: runPython.output },
+      });
+    }
+  }
+
+  return res.json({
+    ok: true,
+    path: filePath,
+    route: routePath,
+    url: `/setup/api/dev/screenshot/file?name=${encodeURIComponent(path.basename(filePath))}`,
+  });
+});
+
+app.get("/setup/api/dev/screenshot/file", requireDevFeatures, (req, res) => {
+  if (!isDevPreviewModeEnabled(req)) {
+    return res.status(403).type("text/plain").send("Preview Mode is OFF.\n");
+  }
+  const name = path.basename(String(req.query.name || ""));
+  if (!name || !name.endsWith(".png")) {
+    return res.status(400).type("text/plain").send("Invalid screenshot filename.\n");
+  }
+  const screenshotPath = path.join(STATE_DIR, "dev-screenshots", name);
+  if (!fs.existsSync(screenshotPath)) {
+    return res.status(404).type("text/plain").send("Screenshot not found.\n");
+  }
+  return res.sendFile(screenshotPath);
+});
 
 // Apply SETUP_PASSWORD auth to /setup routes (before GitHub OAuth)
 app.use("/setup", requireSetupPassword);
@@ -1729,6 +1998,9 @@ app.get("/setup", (req, res) => {
     </div>
     <div class="topbar-right">
       ${avatarHtml}
+      <button class="open-ui-btn" id="previewToggle" type="button" style="display:none;">Preview: OFF</button>
+      <a href="/setup/gallery" target="_blank" class="open-ui-btn" id="previewGalleryLink" style="display:none;">Gallery</a>
+      <a href="/setup/preview" target="_blank" class="open-ui-btn" id="previewFramesLink" style="display:none;">Frames</a>
       <a href="/openclaw" target="_blank" class="open-ui-btn" id="openUiLink" aria-label="Open OpenClaw UI">
         Open UI
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
@@ -1949,6 +2221,7 @@ app.get("/setup", (req, res) => {
         </div>
         <div class="actions">
           <a href="/setup/export" class="btn btn-secondary" target="_blank">Download backup</a>
+          <button class="btn btn-secondary" id="previewCapture" type="button" style="display:none;">Capture Setup Screenshot</button>
         </div>
         <hr class="separator" />
         <div class="field">
@@ -1982,6 +2255,7 @@ app.get("/setup", (req, res) => {
 
   </main>
 
+  <script>window.__OPENCLAW_DEV_FEATURES_ALLOWED__ = ${DEV_FEATURES_ALLOWED ? "true" : "false"};</script>
   <script src="/setup/app.js"></script>
 </body>
 </html>`);
@@ -2460,22 +2734,24 @@ function looksSafeTarPath(p) {
   return true;
 }
 
-async function readBodyBuffer(req, maxBytes) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let total = 0;
-    req.on("data", (chunk) => {
-      total += chunk.length;
-      if (total > maxBytes) {
-        reject(new Error("payload too large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
+async function streamBodyToFile(req, outPath, maxBytes) {
+  const declaredLength = Number.parseInt(req.headers["content-length"] || "0", 10);
+  if (declaredLength > maxBytes) {
+    throw new Error("payload too large");
+  }
+
+  let total = 0;
+  req.on("data", (chunk) => {
+    total += chunk.length;
+    if (total > maxBytes) req.destroy(new Error("payload too large"));
   });
+
+  const out = fs.createWriteStream(outPath, { mode: 0o600 });
+  await pipeline(req, out);
+
+  if (total <= 0) {
+    throw new Error("Empty body");
+  }
 }
 
 // Import a backup created by /setup/export.
@@ -2497,14 +2773,11 @@ app.post("/setup/import", async (req, res) => {
       gatewayProc = null;
     }
 
-    const buf = await readBodyBuffer(req, 250 * 1024 * 1024); // 250MB max
-    if (!buf.length) return res.status(400).type("text/plain").send("Empty body\n");
-
     // Extract into /data.
     // We only allow safe relative paths, and we intentionally do NOT delete existing files.
     // (Users can reset/redeploy or manually clean the volume if desired.)
     const tmpPath = path.join(os.tmpdir(), `openclaw-import-${Date.now()}.tar.gz`);
-    fs.writeFileSync(tmpPath, buf);
+    await streamBodyToFile(req, tmpPath, 250 * 1024 * 1024); // 250MB max
 
     await tar.x({
       file: tmpPath,

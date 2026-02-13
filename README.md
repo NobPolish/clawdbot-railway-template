@@ -11,6 +11,7 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 - Persistent state via **Railway Volume** (so config/credentials/memory survive redeploys)
 - One-click **Export backup** (so users can migrate off Railway later)
 - **Import backup** from `/setup` (advanced recovery)
+- Optional **Setup UI Preview** at `/setup/preview` for visual QA in dev/staging
 - **Docker-based deployment** optimized for Railway's platform
 
 ## 2-minute quickstart (zero guesswork)
@@ -27,6 +28,28 @@ If you want truly seamless onboarding, ignore everything else for now and do onl
 5. Open `/setup`, use the password from logs, click **Deploy Configuration**.
 
 Done. Your app is live at `/` and `/openclaw`.
+
+### Visual preview mode (dev/staging)
+
+If you want to visually verify setup screens side-by-side while developing:
+
+1. Set `OPENCLAW_ENABLE_UI_PREVIEW=true`
+2. Open `/setup`, toggle **Preview: ON** in the top-right
+3. Use `/setup/gallery` for route cards and one-click captures
+4. Use `/setup/preview` for side-by-side iframe previews
+
+Includes dev-only tools:
+- Preview toggle persisted in session
+- Setup/auth route gallery
+- One-click screenshot capture endpoint: `/setup/api/dev/screenshot?path=/setup`
+
+Default routes in preview/gallery:
+- `/setup/create-password`
+- `/setup/password-prompt`
+- `/setup/forgot-password`
+- `/setup/reset-password?token=preview-token`
+- `/setup`
+- `/auth/login`
 
 ### The only things you actually need up front
 

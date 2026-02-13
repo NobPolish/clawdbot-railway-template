@@ -131,6 +131,12 @@
   var importFileEl = document.getElementById('importFile');
   var importRunEl = document.getElementById('importRun');
   var importOutEl = document.getElementById('importOut');
+  var previewCaptureEl = document.getElementById('previewCapture');
+
+
+  var previewToggleEl = document.getElementById('previewToggle');
+  var previewGalleryLinkEl = document.getElementById('previewGalleryLink');
+  var previewFramesLinkEl = document.getElementById('previewFramesLink');
 
   // ======== Model field visibility ========
   var providersWithModel = {
@@ -180,6 +186,92 @@
     if (!btn) return;
     btn.classList.toggle('loading', loading);
     btn.disabled = loading;
+  }
+
+
+  function initPreviewMode() {
+    var devAllowed = Boolean(window.__OPENCLAW_DEV_FEATURES_ALLOWED__);
+    if (!devAllowed) {
+      if (previewToggleEl) previewToggleEl.style.display = 'none';
+      if (previewGalleryLinkEl) previewGalleryLinkEl.style.display = 'none';
+      if (previewFramesLinkEl) previewFramesLinkEl.style.display = 'none';
+      if (previewCaptureEl) previewCaptureEl.style.display = 'none';
+      return;
+    }
+    if (!previewToggleEl) return;
+
+    if (previewGalleryLinkEl) previewGalleryLinkEl.style.display = '';
+    if (previewFramesLinkEl) previewFramesLinkEl.style.display = '';
+    if (previewCaptureEl) previewCaptureEl.style.display = '';
+    previewToggleEl.style.display = '';
+
+    function setPreviewButton(enabled) {
+      previewToggleEl.textContent = enabled ? 'Preview: ON' : 'Preview: OFF';
+      previewToggleEl.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      previewToggleEl.style.borderColor = enabled ? 'rgba(34,197,94,.55)' : 'rgba(244,244,245,.1)';
+      previewToggleEl.style.color = enabled ? '#86efac' : '';
+    }
+
+    httpJson('/setup/api/dev/preview-mode').then(function (j) {
+      setPreviewButton(Boolean(j.enabled));
+    }).catch(function () {
+      previewToggleEl.style.display = 'none';
+      if (previewGalleryLinkEl) previewGalleryLinkEl.style.display = 'none';
+      if (previewFramesLinkEl) previewFramesLinkEl.style.display = 'none';
+    });
+
+    previewToggleEl.addEventListener('click', function () {
+      var nextEnabled = previewToggleEl.textContent.indexOf('OFF') !== -1;
+      httpJson('/setup/api/dev/preview-mode', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled: nextEnabled })
+      }).then(function (j) {
+        setPreviewButton(Boolean(j.enabled));
+        toast('Preview Mode ' + (j.enabled ? 'enabled' : 'disabled'), 'info');
+      }).catch(function (e) {
+        toast('Failed to toggle Preview Mode: ' + String(e), 'error');
+      });
+    });
+
+    if (previewCaptureEl) {
+      previewCaptureEl.addEventListener('click', function () {
+        setLoading(previewCaptureEl, true);
+        httpJson('/setup/api/dev/screenshot?path=' + encodeURIComponent('/setup'))
+          .then(function (j) {
+            toast('Screenshot captured', 'success');
+            if (j && j.url) {
+              window.open(j.url, '_blank');
+            }
+          })
+          .catch(function (err) {
+            toast('Screenshot capture failed: ' + String(err), 'error');
+          })
+          .finally(function () {
+            setLoading(previewCaptureEl, false);
+          });
+      });
+    }
+
+    document.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        previewToggleEl.click();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'g' && previewGalleryLinkEl) {
+        e.preventDefault();
+        window.open('/setup/gallery', '_blank');
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        httpJson('/setup/api/dev/screenshot?path=' + encodeURIComponent('/setup')).then(function (j) {
+          toast('Screenshot captured', 'success');
+          if (j && j.url) window.open(j.url, '_blank');
+        }).catch(function (err) {
+          toast('Screenshot capture failed: ' + String(err), 'error');
+        });
+      }
+    });
   }
 
   function httpJson(url, opts) {
@@ -374,6 +466,9 @@
     }).then(function (res) {
       return res.text().then(function (t) {
         if (importOutEl) importOutEl.textContent += t + '\n';
+        if (!res.ok) {
+          throw new Error('HTTP ' + res.status + ': ' + (t || res.statusText));
+        }
         toast('Backup imported successfully', 'success');
         return refreshStatus();
       });
@@ -437,5 +532,6 @@
   }
 
   // ======== Init ========
+  initPreviewMode();
   refreshStatus();
 })();
