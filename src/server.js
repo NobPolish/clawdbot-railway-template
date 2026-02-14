@@ -35,12 +35,16 @@ const WORKSPACE_DIR =
 // Required env vars: GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
 // Optional: GITHUB_ALLOWED_USERS (comma-separated list of GitHub usernames)
 // If GITHUB_ALLOWED_USERS is not set, any GitHub user can log in.
+// Optional: OPENCLAW_OWNER_GITHUB (single GitHub username)
+// When set, only that user can log in and GitHub OAuth becomes required.
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID?.trim() || "";
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET?.trim() || "";
+const OWNER_GITHUB_USER = process.env.OPENCLAW_OWNER_GITHUB?.trim().toLowerCase() || "";
 const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || "")
   .split(",")
   .map((u) => u.trim().toLowerCase())
   .filter(Boolean);
+const EFFECTIVE_ALLOWED_USERS = OWNER_GITHUB_USER ? [OWNER_GITHUB_USER] : GITHUB_ALLOWED_USERS;
 
 // SETUP_PASSWORD configuration.
 // Returns the env var, a previously-saved password, or null (first run).
@@ -373,9 +377,16 @@ function isAuthConfigured() {
   return Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET);
 }
 
+function isOwnerLockEnabled() {
+  return Boolean(OWNER_GITHUB_USER);
+}
+
 // ---------- SETUP_PASSWORD authentication ----------
 
 function requireSetupPassword(req, res, next) {
+  if (isOwnerLockEnabled()) {
+    return next();
+  }
   // Exclude public routes - paths are relative when middleware is mounted on /setup
   if (
     req.path === "/password-prompt" ||
@@ -420,6 +431,14 @@ function requireAuth(req, res, next) {
     return next();
   }
 
+  if (isOwnerLockEnabled() && !isAuthConfigured()) {
+    const message = "Owner-only access requires GitHub OAuth to be configured.";
+    if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+      return res.status(503).json({ error: message });
+    }
+    return res.status(503).type("text").send(message);
+  }
+
   // If GitHub OAuth is not configured, fall through (allow access).
   // This lets users still complete initial setup before configuring OAuth.
   if (!isAuthConfigured()) {
@@ -455,11 +474,17 @@ function loginPageHTML(error) {
   const errorBlock = error
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
+  const ownerBlock = isOwnerLockEnabled()
+    ? `<div class="alert alert-owner">
+        Owner-only mode is enabled for <strong>@${escapeHtml(OWNER_GITHUB_USER)}</strong>.
+        Only that GitHub account can sign in.
+      </div>`
+    : "";
   const notConfigured = !isAuthConfigured()
     ? `<div class="alert alert-warn">
         <strong>GitHub OAuth not configured.</strong><br/>
         Set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> in your Railway variables.<br/>
-        Optionally set <code>GITHUB_ALLOWED_USERS</code> to restrict access.
+        ${isOwnerLockEnabled() ? "Owner-only mode requires OAuth to be configured." : "Optionally set <code>GITHUB_ALLOWED_USERS</code> to restrict access."}
       </div>`
     : "";
   const btnDisabled = !isAuthConfigured() ? "disabled" : "";
@@ -521,6 +546,7 @@ function loginPageHTML(error) {
     }
     .alert-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(127,29,29,0.5); color: #fca5a5; }
     .alert-warn { background: rgba(234,179,8,0.06); border: 1px solid rgba(133,77,14,0.5); color: #fde68a; }
+    .alert-owner { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.3); color: #bfdbfe; }
     .alert code {
       background: #1c1c21; padding: 0.1rem 0.3rem; border-radius: 3px;
       font-size: 0.75rem; color: #d4d4d8;
@@ -555,6 +581,7 @@ function loginPageHTML(error) {
     <h1>Welcome to OpenClaw</h1>
     <p class="subtitle">Sign in to manage your instance</p>
     ${errorBlock}
+    ${ownerBlock}
     ${notConfigured}
     <a href="/auth/github" class="${btnCls}" ${btnDisabled}>
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -628,7 +655,7 @@ app.get("/auth/github/callback", async (req, res) => {
     const username = (user.login || "").toLowerCase();
 
     // Check allowlist
-    if (GITHUB_ALLOWED_USERS.length > 0 && !GITHUB_ALLOWED_USERS.includes(username)) {
+    if (EFFECTIVE_ALLOWED_USERS.length > 0 && !EFFECTIVE_ALLOWED_USERS.includes(username)) {
       return res.redirect(
         "/auth/login?error=" +
           encodeURIComponent(`Access denied. User "${user.login}" is not in the allowed users list.`),
@@ -2295,8 +2322,10 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[wrapper] gateway target: ${GATEWAY_TARGET}`);
   if (isAuthConfigured()) {
     console.log(`[wrapper] auth: GitHub OAuth (client_id=${GITHUB_CLIENT_ID.slice(0, 8)}...)`);
-    if (GITHUB_ALLOWED_USERS.length > 0) {
-      console.log(`[wrapper] allowed users: ${GITHUB_ALLOWED_USERS.join(", ")}`);
+    if (isOwnerLockEnabled()) {
+      console.log(`[wrapper] owner-only access: @${OWNER_GITHUB_USER}`);
+    } else if (EFFECTIVE_ALLOWED_USERS.length > 0) {
+      console.log(`[wrapper] allowed users: ${EFFECTIVE_ALLOWED_USERS.join(", ")}`);
     } else {
       console.log(`[wrapper] allowed users: (any GitHub user)`);
     }
