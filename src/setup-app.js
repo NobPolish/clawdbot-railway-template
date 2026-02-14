@@ -132,6 +132,25 @@
   var importRunEl = document.getElementById('importRun');
   var importOutEl = document.getElementById('importOut');
 
+  var envStatusPillEl = document.getElementById('envStatusPill');
+  var envStateDirEl = document.getElementById('envStateDir');
+  var envWorkspaceDirEl = document.getElementById('envWorkspaceDir');
+  var envGatewayTokenEl = document.getElementById('envGatewayToken');
+  var envSetupPasswordEl = document.getElementById('envSetupPassword');
+  var envStateStatusEl = document.getElementById('envStateStatus');
+  var envWorkspaceStatusEl = document.getElementById('envWorkspaceStatus');
+  var envGatewayStatusEl = document.getElementById('envGatewayStatus');
+  var envPasswordStatusEl = document.getElementById('envPasswordStatus');
+  var envHelpEl = document.getElementById('envHelp');
+  var envHelpVolumeEl = document.getElementById('envHelpVolume');
+  var envHelpGatewayEl = document.getElementById('envHelpGateway');
+  var envHelpPasswordEl = document.getElementById('envHelpPassword');
+  var envHelpGithubEl = document.getElementById('envHelpGithub');
+  var securityPasswordStatusEl = document.getElementById('securityPasswordStatus');
+  var securityGatewayStatusEl = document.getElementById('securityGatewayStatus');
+  var securityGithubStatusEl = document.getElementById('securityGithubStatus');
+  var securityVolumeStatusEl = document.getElementById('securityVolumeStatus');
+
   // ======== Model field visibility ========
   var providersWithModel = {
     'openrouter-api-key': { placeholder: 'anthropic/claude-sonnet-4', hint: 'OpenRouter: <code>provider/model-name</code>' },
@@ -182,6 +201,42 @@
     btn.disabled = loading;
   }
 
+  function setPill(el, ok, label) {
+    if (!el) return;
+    el.classList.remove('ok', 'warn');
+    if (ok === true) el.classList.add('ok');
+    if (ok === false) el.classList.add('warn');
+    el.textContent = label;
+  }
+
+  function setText(el, text) {
+    if (!el) return;
+    el.textContent = text;
+  }
+
+  function copyText(text) {
+    if (!text) return Promise.reject(new Error('Nothing to copy'));
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      try {
+        var textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.top = '-999px';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        ok ? resolve() : reject(new Error('Copy failed'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   function httpJson(url, opts) {
     opts = opts || {};
     opts.credentials = 'same-origin';
@@ -200,6 +255,52 @@
   }
 
   // ======== Status ========
+  function refreshEnvironmentStatus() {
+    if (!envStatusPillEl) return Promise.resolve();
+    return httpJson('/setup/api/debug').then(function (j) {
+      var wrapper = j.wrapper || {};
+      var stateDir = wrapper.stateDir || '';
+      var workspaceDir = wrapper.workspaceDir || '';
+      var hasGatewayToken = Boolean(wrapper.gatewayTokenFromEnv || wrapper.gatewayTokenPersisted);
+      var passwordReady = Boolean(wrapper.setupPasswordConfigured);
+      var githubReady = Boolean(wrapper.githubOAuthConfigured);
+      var volumeReady = stateDir.indexOf('/data') === 0 || workspaceDir.indexOf('/data') === 0;
+
+      setText(envStateDirEl, stateDir || 'Unknown');
+      setText(envWorkspaceDirEl, workspaceDir || 'Unknown');
+      setText(envGatewayTokenEl, hasGatewayToken ? 'Token stored' : 'Missing token');
+      setText(envSetupPasswordEl, passwordReady ? 'Configured' : 'Pending');
+
+      setPill(envStateStatusEl, volumeReady, volumeReady ? 'Volume ready' : 'Check volume');
+      setPill(envWorkspaceStatusEl, volumeReady, volumeReady ? 'Volume ready' : 'Check volume');
+      setPill(envGatewayStatusEl, hasGatewayToken, hasGatewayToken ? 'Secure' : 'Add token');
+      setPill(envPasswordStatusEl, passwordReady, passwordReady ? 'Protected' : 'Create password');
+
+      setPill(securityPasswordStatusEl, passwordReady, passwordReady ? 'Ready' : 'Missing');
+      setPill(securityGatewayStatusEl, hasGatewayToken, hasGatewayToken ? 'Ready' : 'Missing');
+      setPill(securityGithubStatusEl, githubReady, githubReady ? 'Ready' : 'Missing');
+      setPill(securityVolumeStatusEl, volumeReady, volumeReady ? 'Ready' : 'Missing');
+
+      var overallOk = volumeReady && hasGatewayToken && passwordReady && githubReady;
+      setPill(envStatusPillEl, overallOk, overallOk ? 'Ready' : 'Needs review');
+
+      if (envHelpEl) {
+        var showHelp = !overallOk;
+        envHelpEl.hidden = !showHelp;
+        if (envHelpVolumeEl) envHelpVolumeEl.hidden = volumeReady;
+        if (envHelpGatewayEl) envHelpGatewayEl.hidden = hasGatewayToken;
+        if (envHelpPasswordEl) envHelpPasswordEl.hidden = passwordReady;
+        if (envHelpGithubEl) envHelpGithubEl.hidden = githubReady;
+      }
+    }).catch(function () {
+      setPill(envStatusPillEl, false, 'Unavailable');
+      setPill(securityPasswordStatusEl, false, 'Unavailable');
+      setPill(securityGatewayStatusEl, false, 'Unavailable');
+      setPill(securityGithubStatusEl, false, 'Unavailable');
+      setPill(securityVolumeStatusEl, false, 'Unavailable');
+    });
+  }
+
   function refreshStatus() {
     setStatus('Checking...', 'loading');
     return httpJson('/setup/api/status').then(function (j) {
@@ -211,9 +312,11 @@
         setStatus('Not configured', 'err');
       }
       loadConfigRaw();
+      refreshEnvironmentStatus();
     }).catch(function (e) {
       setStatus('Connection error', 'err');
       if (statusVersion) statusVersion.textContent = '';
+      setPill(envStatusPillEl, false, 'Unavailable');
     });
   }
 
@@ -353,6 +456,18 @@
     loadConfigRaw().then(function () { toast('Config reloaded', 'info'); });
   });
   if (configSaveEl) configSaveEl.addEventListener('click', saveConfigRaw);
+
+  // ======== Copy buttons ========
+  document.querySelectorAll('[data-copy]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.getAttribute('data-copy');
+      copyText(text).then(function () {
+        toast('Copied to clipboard', 'success');
+      }).catch(function () {
+        toast('Copy failed', 'error');
+      });
+    });
+  });
 
   // ======== Import ========
   function runImport() {
