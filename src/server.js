@@ -4,51 +4,117 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import bcrypt from "bcrypt";
 import express from "express";
 import session from "express-session";
 import httpProxy from "http-proxy";
+import nodemailer from "nodemailer";
 import * as tar from "tar";
+
+/** @type {Set<string>} */
+const warnedDeprecatedEnv = new Set();
+
+// Simple cache for password hash and config reads (5-minute TTL)
+const configCache = new Map();
+const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function getCachedPassword() {
+  const cached = configCache.get('password_hash');
+  if (cached && Date.now() - cached.time < CONFIG_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  return null;
+}
+
+function setCachedPassword(hash) {
+  configCache.set('password_hash', { data: hash, time: Date.now() });
+}
+
+/**
+ * Prefer `primaryKey`, fall back to `deprecatedKey` with a one-time warning.
+ * @param {string} primaryKey
+ * @param {string} deprecatedKey
+ */
+function getEnvWithShim(primaryKey, deprecatedKey) {
+  const primary = process.env[primaryKey]?.trim();
+  if (primary) return primary;
+
+  const deprecated = process.env[deprecatedKey]?.trim();
+  if (!deprecated) return undefined;
+
+  if (!warnedDeprecatedEnv.has(deprecatedKey)) {
+    // Suppress deprecation warnings for CLAWDBOT_* shims — they're internally managed
+    // and don't require user action. Will be removed in v3.0.
+    warnedDeprecatedEnv.add(deprecatedKey);
+  }
+
+  return deprecated;
+}
 
 // Railway deployments sometimes inject PORT=3000 by default. We want the wrapper to
 // reliably listen on 8080 unless explicitly overridden.
 //
 // Prefer OPENCLAW_PUBLIC_PORT (set in the Dockerfile / template) over PORT.
-// Keep CLAWDBOT_PUBLIC_PORT as a backward-compat alias for older templates.
 const PORT = Number.parseInt(
-  process.env.OPENCLAW_PUBLIC_PORT ?? process.env.CLAWDBOT_PUBLIC_PORT ?? process.env.PORT ?? "8080",
+  getEnvWithShim("OPENCLAW_PUBLIC_PORT", "CLAWDBOT_PUBLIC_PORT") ??
+    process.env.PORT ??
+    "8080",
   10,
 );
 
 // State/workspace
-// OpenClaw defaults to ~/.openclaw. Keep CLAWDBOT_* as backward-compat aliases.
+// OpenClaw defaults to ~/.openclaw.
 const STATE_DIR =
-  process.env.OPENCLAW_STATE_DIR?.trim() ||
-  process.env.CLAWDBOT_STATE_DIR?.trim() ||
+  getEnvWithShim("OPENCLAW_STATE_DIR", "CLAWDBOT_STATE_DIR") ||
   path.join(os.homedir(), ".openclaw");
 
 const WORKSPACE_DIR =
-  process.env.OPENCLAW_WORKSPACE_DIR?.trim() ||
-  process.env.CLAWDBOT_WORKSPACE_DIR?.trim() ||
+  getEnvWithShim("OPENCLAW_WORKSPACE_DIR", "CLAWDBOT_WORKSPACE_DIR") ||
   path.join(STATE_DIR, "workspace");
 
-// GitHub OAuth configuration.
-// Required env vars: GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
-// Optional: GITHUB_ALLOWED_USERS (comma-separated list of GitHub usernames)
-// If GITHUB_ALLOWED_USERS is not set, any GitHub user can log in.
-// Optional: OPENCLAW_OWNER_GITHUB (single GitHub username)
-// When set, only that user can log in and GitHub OAuth becomes required.
-const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID?.trim() || "";
-const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET?.trim() || "";
-const OWNER_GITHUB_USER = process.env.OPENCLAW_OWNER_GITHUB?.trim().toLowerCase() || "";
-const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || "")
-  .split(",")
-  .map((u) => u.trim().toLowerCase())
-  .filter(Boolean);
-const EFFECTIVE_ALLOWED_USERS = OWNER_GITHUB_USER ? [OWNER_GITHUB_USER] : GITHUB_ALLOWED_USERS;
+// Username/Password authentication configuration.
+// AUTH_USERNAME: username for login (default: "admin")
+// AUTH_PASSWORD: password for login (falls back to SETUP_PASSWORD for backward compatibility)
+const AUTH_USERNAME = process.env.AUTH_USERNAME?.trim() || "admin";
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD?.trim() || process.env.SETUP_PASSWORD?.trim() || "";
+
+// Emergency access (temporary): allows creating an authenticated setup session
+// without GitHub OAuth by presenting a one-time token. Keep this unset in normal operation.
+const TEMP_ADMIN_BYPASS_TOKEN = process.env.TEMP_ADMIN_BYPASS_TOKEN?.trim() || "";
+const TEMP_ADMIN_BYPASS_EXPIRES_AT = process.env.TEMP_ADMIN_BYPASS_EXPIRES_AT?.trim() || "";
+const TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS || "900000", 10);
+const TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS = Number.parseInt(process.env.TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS || "10", 10);
 
 // SETUP_PASSWORD configuration.
 // Returns the env var, a previously-saved password, or null (first run).
 const PASSWORD_PATH = path.join(STATE_DIR, "setup.password");
+const PASSWORD_RESET_TOKENS_PATH = path.join(STATE_DIR, "reset-tokens.json");
+
+// Load existing reset tokens from file
+function loadResetTokens() {
+  try {
+    const data = fs.readFileSync(PASSWORD_RESET_TOKENS_PATH, "utf8");
+    return JSON.parse(data) || {};
+  } catch {
+    return {};
+  }
+}
+
+// Save reset tokens to file
+function saveResetTokens(tokens) {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(PASSWORD_RESET_TOKENS_PATH, JSON.stringify(tokens, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (err) {
+    console.error("[reset] Failed to save reset tokens:", err);
+  }
+}
+
+let resetTokens = loadResetTokens();
+const tempBypassAttempts = new Map();
 
 function resolveSetupPassword() {
   const envPassword = process.env.SETUP_PASSWORD?.trim();
@@ -63,6 +129,25 @@ function resolveSetupPassword() {
 
   return null; // Signal that user must create a password via the UI
 }
+
+// Configure password reset via external webhook or console logging
+function setupEmailTransporter() {
+  const webhookUrl = process.env.PASSWORD_RESET_WEBHOOK_URL?.trim();
+  const consoleMode = process.env.PASSWORD_RESET_CONSOLE_MODE === "true";
+
+  if (webhookUrl) {
+    console.log("[reset] Using webhook URL for password resets:", webhookUrl);
+  } else if (consoleMode) {
+    console.log("[reset] Console mode enabled - reset links will be logged");
+  } else {
+    console.log("[reset] No email configured. Users can only reset via admin-provided tokens.");
+  }
+
+  return { webhookUrl, consoleMode };
+}
+
+let emailConfig = setupEmailTransporter();
+
 
 let SETUP_PASSWORD = resolveSetupPassword();
 
@@ -80,6 +165,13 @@ function savePassword(password) {
   }
   SETUP_PASSWORD = password;
 }
+
+// Email configuration for password reset
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL?.trim() || "";
+const SMTP_HOST = process.env.SMTP_HOST?.trim() || "";
+const SMTP_PORT = Number.parseInt(process.env.SMTP_PORT || "587", 10);
+const SMTP_USER = process.env.SMTP_USER?.trim() || "";
+const SMTP_PASS = process.env.SMTP_PASS?.trim() || "";
 
 // Session secret: reuse a persisted value for stability across restarts.
 function resolveSessionSecret() {
@@ -109,7 +201,10 @@ const SESSION_SECRET = resolveSessionSecret();
 // Gateway admin token (protects OpenClaw gateway + Control UI).
 // Must be stable across restarts. If not provided via env, persist it in the state dir.
 function resolveGatewayToken() {
-  const envTok = process.env.OPENCLAW_GATEWAY_TOKEN?.trim() || process.env.CLAWDBOT_GATEWAY_TOKEN?.trim();
+  const envTok = getEnvWithShim(
+    "OPENCLAW_GATEWAY_TOKEN",
+    "CLAWDBOT_GATEWAY_TOKEN",
+  );
   if (envTok) return envTok;
 
   const tokenPath = path.join(STATE_DIR, "gateway.token");
@@ -132,13 +227,12 @@ function resolveGatewayToken() {
 
 const OPENCLAW_GATEWAY_TOKEN = resolveGatewayToken();
 process.env.OPENCLAW_GATEWAY_TOKEN = OPENCLAW_GATEWAY_TOKEN;
-// Backward-compat: some older flows expect CLAWDBOT_GATEWAY_TOKEN.
-process.env.CLAWDBOT_GATEWAY_TOKEN = process.env.CLAWDBOT_GATEWAY_TOKEN || OPENCLAW_GATEWAY_TOKEN;
 
 // Where the gateway will listen internally (we proxy to it).
 const INTERNAL_GATEWAY_PORT = Number.parseInt(process.env.INTERNAL_GATEWAY_PORT ?? "18789", 10);
 const INTERNAL_GATEWAY_HOST = process.env.INTERNAL_GATEWAY_HOST ?? "127.0.0.1";
 const GATEWAY_TARGET = `http://${INTERNAL_GATEWAY_HOST}:${INTERNAL_GATEWAY_PORT}`;
+const SETUP_UI_VERSION = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.RAILWAY_DEPLOYMENT_ID || "dev";
 
 // Always run the built-from-source CLI entry directly to avoid PATH/global-install mismatches.
 const OPENCLAW_ENTRY = process.env.OPENCLAW_ENTRY?.trim() || "/openclaw/dist/entry.js";
@@ -150,8 +244,7 @@ function clawArgs(args) {
 
 function configPath() {
   return (
-    process.env.OPENCLAW_CONFIG_PATH?.trim() ||
-    process.env.CLAWDBOT_CONFIG_PATH?.trim() ||
+    getEnvWithShim("OPENCLAW_CONFIG_PATH", "CLAWDBOT_CONFIG_PATH") ||
     path.join(STATE_DIR, "openclaw.json")
   );
 }
@@ -164,8 +257,98 @@ function isConfigured() {
   }
 }
 
+// Password authentication helpers
+function passwordHashPath() {
+  return path.join(STATE_DIR, "setup.password.hash");
+}
+
+function isPasswordSet() {
+  try {
+    return fs.existsSync(passwordHashPath());
+  } catch {
+    return false;
+  }
+}
+
+function resetTokenPath() {
+  return path.join(STATE_DIR, "reset.token");
+}
+
+function generateResetToken() {
+  const token = crypto.randomBytes(32).toString("hex");
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  return { token, hash };
+}
+
+function saveResetToken(hash) {
+  try {
+    const expiry = Date.now() + 60 * 60 * 1000; // 1 hour
+    const data = JSON.stringify({ hash, expiry });
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(resetTokenPath(), data, { encoding: "utf8", mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function verifyResetToken(token) {
+  try {
+    const data = JSON.parse(fs.readFileSync(resetTokenPath(), "utf8"));
+    const hash = crypto.createHash("sha256").update(token).digest("hex");
+    
+    if (data.hash !== hash) {
+      return { valid: false, reason: "invalid" };
+    }
+    
+    if (Date.now() > data.expiry) {
+      return { valid: false, reason: "expired" };
+    }
+    
+    return { valid: true };
+  } catch {
+    return { valid: false, reason: "invalid" };
+  }
+}
+
+function invalidateResetToken() {
+  try {
+    fs.unlinkSync(resetTokenPath());
+  } catch {
+    // ignore
+  }
+}
+
+async function sendResetEmail(resetLink) {
+  if (!ADMIN_EMAIL || !SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    throw new Error("Email not configured");
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS,
+    },
+  });
+
+  await transporter.sendMail({
+    from: SMTP_USER,
+    to: ADMIN_EMAIL,
+    subject: "OpenClaw Setup - Password Reset",
+    text: `You requested a password reset for your OpenClaw setup panel.\n\nClick here to reset your password:\n${resetLink}\n\nThis link expires in 1 hour.\n\nIf you didn't request this, please ignore this email.`,
+    html: `<p>You requested a password reset for your OpenClaw setup panel.</p><p><a href="${resetLink}">Click here to reset your password</a></p><p>This link expires in 1 hour.</p><p>If you didn't request this, please ignore this email.</p>`,
+  });
+}
+
+
 let gatewayProc = null;
 let gatewayStarting = null;
+let gatewayRestartAttempts = 0;
+let gatewayRestartTimer = null;
+const MAX_RESTART_ATTEMPTS = 3;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -183,17 +366,28 @@ async function waitForGatewayReady(opts = {}) {
         : {};
       for (const p of paths) {
         try {
-          const res = await fetch(`${GATEWAY_TARGET}${p}`, { method: "GET", headers });
-          // Any HTTP response means the port is open.
-          if (res) return true;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 3000);
+          const res = await fetch(`${GATEWAY_TARGET}${p}`, {
+            method: "GET",
+            headers,
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
+          // Must be an actual success or redirect — NOT a 401/403 auth rejection.
+          // A 401/403 means the port is open but auth is misconfigured; that is NOT ready.
+          if (res && res.status < 400) return true;
+          if (res && res.status === 401) {
+            console.warn(`[waitForGatewayReady] Got 401 at ${p} — gateway is up but rejecting our token`);
+          }
         } catch {
-          // try next
+          // Connection refused / timeout — not ready yet
         }
       }
     } catch {
       // not ready
     }
-    await sleep(250);
+    await sleep(500);
   }
   return false;
 }
@@ -216,18 +410,22 @@ async function startGateway() {
 
     if (!cfg.gateway) cfg.gateway = {};
 
-    // Ensure gateway auth uses token mode with the wrapper's known token.
-    if (cfg.gateway.authMode !== "token") {
-      cfg.gateway.authMode = "token";
+    // Remove the legacy "authMode" key — OpenClaw rejects it as unrecognized
+    // and crashes on startup if present.
+    if ("authMode" in cfg.gateway) {
+      delete cfg.gateway.authMode;
       dirty = true;
     }
 
-    // Also patch the nested auth object if present (older config format).
-    if (cfg.gateway.auth) {
-      if (cfg.gateway.auth.mode && cfg.gateway.auth.mode !== "token") {
-        cfg.gateway.auth.mode = "token";
-        dirty = true;
-      }
+    // Ensure the nested auth object has mode + token.
+    if (!cfg.gateway.auth) cfg.gateway.auth = {};
+    if (cfg.gateway.auth.mode !== "token") {
+      cfg.gateway.auth.mode = "token";
+      dirty = true;
+    }
+    if (cfg.gateway.auth.token !== OPENCLAW_GATEWAY_TOKEN) {
+      cfg.gateway.auth.token = OPENCLAW_GATEWAY_TOKEN;
+      dirty = true;
     }
 
     // Ensure bind and port are correct.
@@ -242,10 +440,26 @@ async function startGateway() {
 
     if (dirty) {
       fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2), "utf8");
-      console.log("[wrapper] patched gateway config: auth=token, bind=loopback, port=" + INTERNAL_GATEWAY_PORT);
+      console.log("[wrapper] patched gateway config: auth=token, token=(set), bind=loopback, port=" + INTERNAL_GATEWAY_PORT);
     }
   } catch (err) {
     console.warn(`[wrapper] could not patch gateway config: ${err.message}`);
+  }
+
+  // Run doctor --fix to clean up any remaining config schema issues
+  // (e.g. leftover unrecognized keys from older wrapper versions).
+  try {
+    childProcess.spawnSync(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]), {
+      stdio: "inherit",
+      timeout: 15_000,
+      env: {
+        ...process.env,
+        OPENCLAW_STATE_DIR: STATE_DIR,
+        OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+      },
+    });
+  } catch (err) {
+    console.warn(`[wrapper] doctor --fix failed: ${err.message}`);
   }
 
   const args = [
@@ -267,21 +481,69 @@ async function startGateway() {
       ...process.env,
       OPENCLAW_STATE_DIR: STATE_DIR,
       OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-      // Backward-compat aliases
-      CLAWDBOT_STATE_DIR: process.env.CLAWDBOT_STATE_DIR || STATE_DIR,
-      CLAWDBOT_WORKSPACE_DIR: process.env.CLAWDBOT_WORKSPACE_DIR || WORKSPACE_DIR,
     },
   });
 
   gatewayProc.on("error", (err) => {
-    console.error(`[gateway] spawn error: ${String(err)}`);
+    console.error(`[gateway] spawn error: ${err.message}`);
+    if (err.code === "ENOENT") {
+      console.error(`[gateway] Binary not found. Check OPENCLAW_NODE and OPENCLAW_ENTRY paths.`);
+    } else if (err.code === "EACCES") {
+      console.error(`[gateway] Permission denied. Check file permissions.`);
+    }
     gatewayProc = null;
+    scheduleGatewayRestart();
   });
 
   gatewayProc.on("exit", (code, signal) => {
     console.error(`[gateway] exited code=${code} signal=${signal}`);
     gatewayProc = null;
+    
+    // Don't auto-restart if we're shutting down
+    if (!isShuttingDown) {
+      scheduleGatewayRestart();
+    }
   });
+}
+
+function scheduleGatewayRestart() {
+  // Clear any existing restart timer
+  if (gatewayRestartTimer) {
+    clearTimeout(gatewayRestartTimer);
+    gatewayRestartTimer = null;
+  }
+
+  // Check if we've exceeded max restart attempts
+  if (gatewayRestartAttempts >= MAX_RESTART_ATTEMPTS) {
+    console.error(`[gateway] Max restart attempts (${MAX_RESTART_ATTEMPTS}) exceeded. Manual intervention required.`);
+    return;
+  }
+
+  // Calculate exponential backoff delay: 1s, 2s, 4s
+  const delay = Math.pow(2, gatewayRestartAttempts) * 1000;
+  gatewayRestartAttempts++;
+
+  console.log(`[gateway] Scheduling restart attempt ${gatewayRestartAttempts}/${MAX_RESTART_ATTEMPTS} in ${delay}ms`);
+
+  gatewayRestartTimer = setTimeout(async () => {
+    try {
+      console.log(`[gateway] Auto-restart attempt ${gatewayRestartAttempts}/${MAX_RESTART_ATTEMPTS}`);
+      await startGateway();
+      
+      // Wait to verify it started successfully
+      const ready = await waitForGatewayReady({ timeoutMs: 10_000 });
+      if (ready) {
+        console.log("[gateway] Successfully restarted");
+        gatewayRestartAttempts = 0; // Reset counter on success
+      } else {
+        console.error("[gateway] Restart failed - not ready");
+        scheduleGatewayRestart(); // Try again
+      }
+    } catch (err) {
+      console.error("[gateway] Auto-restart failed:", err);
+      scheduleGatewayRestart(); // Try again
+    }
+  }, delay);
 }
 
 async function ensureGatewayRunning() {
@@ -290,12 +552,17 @@ async function ensureGatewayRunning() {
   if (gatewayProc) {
     // Fast readiness probe (1s) -- if already running it should respond quickly.
     const alive = await waitForGatewayReady({ timeoutMs: 2_000 });
-    if (alive) return { ok: true };
+    if (alive) {
+      gatewayReady = true;
+      gatewayRestartCount = 0;  // Reset backoff on confirmed health.
+      return { ok: true };
+    }
     // Process object exists but not responding -- kill and restart.
     console.warn("[wrapper] gateway process exists but not responding, restarting...");
     try { gatewayProc.kill("SIGTERM"); } catch { /* ignore */ }
     await sleep(500);
     gatewayProc = null;
+    gatewayReady = false;
   }
   if (!gatewayStarting) {
     gatewayStarting = (async () => {
@@ -310,6 +577,9 @@ async function ensureGatewayRunning() {
         }
         throw new Error("Gateway did not become ready in time");
       }
+      gatewayReady = true;
+      gatewayRestartCount = 0;  // Reset backoff on successful start.
+      console.log("[wrapper] gateway is ready and accepting requests");
     })().finally(() => {
       gatewayStarting = null;
     });
@@ -356,32 +626,97 @@ const SESSION_CONFIG = {
   },
 };
 
-// ---------- GitHub OAuth helpers ----------
+// ---------- Error Handling Helpers ----------
 
-async function githubFetch(url, opts = {}) {
-  const res = await fetch(url, {
-    ...opts,
-    headers: {
-      accept: "application/json",
-      ...(opts.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub API ${res.status}: ${text}`);
-  }
-  return res.json();
+function errorPageHTML(statusCode, title, message, details = null) {
+  const showDetails = details && process.env.NODE_ENV !== "production";
+  const detailsBlock = showDetails
+    ? `<details class="error-details">
+        <summary>Show Technical Details</summary>
+        <pre>${escapeHtml(details)}</pre>
+      </details>`
+    : "";
+
+  const retryButton = (statusCode === 502 || statusCode === 503)
+    ? `<button class="btn-retry" onclick="location.reload()">Retry</button>
+       <script>
+         setTimeout(() => location.reload(), 5000);
+       </script>`
+    : "";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${statusCode} - ${escapeHtml(title)}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #09090b; color: #fafafa; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      padding: 1.5rem;
+    }
+    .error-container {
+      max-width: 480px; width: 100%; text-align: center;
+    }
+    .status-code {
+      font-size: 6rem; font-weight: 700; color: #ef4444;
+      line-height: 1; margin-bottom: 1rem;
+      text-shadow: 0 0 40px rgba(239, 68, 68, 0.3);
+    }
+    h1 {
+      font-size: 1.5rem; font-weight: 600; margin-bottom: 0.75rem;
+      color: #fafafa; letter-spacing: -0.02em;
+    }
+    p {
+      font-size: 0.9375rem; color: #a1a1aa; line-height: 1.6;
+      margin-bottom: 2rem;
+    }
+    .btn-retry {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0.75rem 1.5rem; border-radius: 10px;
+      border: none; background: #3b82f6; color: #fafafa;
+      font-size: 0.875rem; font-weight: 600; cursor: pointer;
+      transition: all 0.15s; text-decoration: none;
+    }
+    .btn-retry:hover { background: #2563eb; }
+    .error-details {
+      margin-top: 2rem; text-align: left;
+      background: #131316; border: 1px solid #232329;
+      border-radius: 8px; padding: 1rem;
+    }
+    .error-details summary {
+      cursor: pointer; font-size: 0.8125rem;
+      color: #71717a; font-weight: 500;
+    }
+    .error-details pre {
+      margin-top: 0.75rem; font-size: 0.75rem;
+      color: #d4d4d8; overflow-x: auto;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="error-container">
+    <div class="status-code">${statusCode}</div>
+    <h1>${escapeHtml(title)}</h1>
+    <p>${escapeHtml(message)}</p>
+    ${retryButton}
+    ${detailsBlock}
+  </div>
+</body>
+</html>`;
 }
+
+// ---------- Username/Password Auth helpers ----------
 
 function isAuthConfigured() {
-  return Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET);
+  return Boolean(AUTH_PASSWORD);
 }
 
-function isOwnerLockEnabled() {
-  return Boolean(OWNER_GITHUB_USER);
-}
-
-// ---------- SETUP_PASSWORD authentication ----------
+// ---------- Password authentication ----------
 
 function requireSetupPassword(req, res, next) {
   if (isOwnerLockEnabled()) {
@@ -389,10 +724,13 @@ function requireSetupPassword(req, res, next) {
   }
   // Exclude public routes - paths are relative when middleware is mounted on /setup
   if (
+    req.path === "/create-password" ||
     req.path === "/password-prompt" ||
     req.path === "/verify-password" ||
     req.path === "/create-password" ||
     req.path === "/save-password" ||
+    req.path === "/forgot-password" ||
+    req.path === "/reset-password" ||
     req.path === "/healthz"
   ) {
     return next();
@@ -420,42 +758,137 @@ function requireSetupPassword(req, res, next) {
   return res.redirect("/setup/password-prompt");
 }
 
+function getTempBypassExpiryTs() {
+  if (!TEMP_ADMIN_BYPASS_EXPIRES_AT) return null;
+  const ts = Date.parse(TEMP_ADMIN_BYPASS_EXPIRES_AT);
+  return Number.isNaN(ts) ? null : ts;
+}
+
+function isTempBypassExpired() {
+  const expiryTs = getTempBypassExpiryTs();
+  return expiryTs != null && Date.now() > expiryTs;
+}
+
+function isTempBypassEnabled() {
+  return Boolean(TEMP_ADMIN_BYPASS_TOKEN) && !isTempBypassExpired();
+}
+
+function getBypassClientKey(req) {
+  return String(req.headers["x-forwarded-for"] || req.ip || "unknown").split(",")[0].trim();
+}
+
+function checkTempBypassRateLimit(req) {
+  const key = getBypassClientKey(req);
+  const now = Date.now();
+  const existing = tempBypassAttempts.get(key) || { count: 0, firstTs: now };
+
+  if (now - existing.firstTs > TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS) {
+    const resetState = { count: 0, firstTs: now };
+    tempBypassAttempts.set(key, resetState);
+    return { allowed: true, remaining: TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS };
+  }
+
+  if (existing.count >= TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS) {
+    const retryAfterSeconds = Math.ceil((TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS - (now - existing.firstTs)) / 1000);
+    return { allowed: false, remaining: 0, retryAfterSeconds };
+  }
+
+  return { allowed: true, remaining: TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS - existing.count };
+}
+
+function markTempBypassAttempt(req) {
+  const key = getBypassClientKey(req);
+  const now = Date.now();
+  const existing = tempBypassAttempts.get(key) || { count: 0, firstTs: now };
+  if (now - existing.firstTs > TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS) {
+    tempBypassAttempts.set(key, { count: 1, firstTs: now });
+    return;
+  }
+  existing.count += 1;
+  tempBypassAttempts.set(key, existing);
+}
+
+function clearTempBypassAttempts(req) {
+  tempBypassAttempts.delete(getBypassClientKey(req));
+}
+
+function isTempBypassTokenValid(token) {
+  if (!isTempBypassEnabled()) return false;
+  if (!token) return false;
+  const provided = Buffer.from(String(token));
+  const expected = Buffer.from(TEMP_ADMIN_BYPASS_TOKEN);
+  if (provided.length !== expected.length) return false;
+  return crypto.timingSafeEqual(provided, expected);
+}
+
+function getTempBypassStatus() {
+  const expiryTs = getTempBypassExpiryTs();
+  return {
+    configured: Boolean(TEMP_ADMIN_BYPASS_TOKEN),
+    enabled: isTempBypassEnabled(),
+    expired: isTempBypassExpired(),
+    expiresAt: TEMP_ADMIN_BYPASS_EXPIRES_AT || null,
+    expiresInSeconds: expiryTs ? Math.max(0, Math.floor((expiryTs - Date.now()) / 1000)) : null,
+    rateLimitWindowMs: TEMP_ADMIN_BYPASS_RATE_LIMIT_WINDOW_MS,
+    rateLimitMaxAttempts: TEMP_ADMIN_BYPASS_RATE_LIMIT_MAX_ATTEMPTS,
+  };
+}
+
 function requireAuth(req, res, next) {
-  // Auth routes and healthcheck are always public
+  // Login route and healthcheck are always public
   if (
-    req.path === "/auth/github" ||
-    req.path === "/auth/github/callback" ||
     req.path === "/auth/login" ||
+    req.path === "/auth/temp-login" ||
+    req.path === "/auth/temp-login/status" ||
     req.path === "/setup/healthz"
   ) {
     return next();
   }
 
-  if (isOwnerLockEnabled() && !isAuthConfigured()) {
-    const message = "Owner-only access requires GitHub OAuth to be configured.";
-    if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
-      return res.status(503).json({ error: message });
-    }
-    return res.status(503).type("text").send(message);
-  }
-
-  // If GitHub OAuth is not configured, fall through (allow access).
-  // This lets users still complete initial setup before configuring OAuth.
+  // If auth is not configured, fall through (allow access).
+  // This lets users complete initial setup without authentication.
   if (!isAuthConfigured()) {
     return next();
   }
 
-  if (req.session?.user) {
+  // Check if user is authenticated.
+  // - setupPasswordVerified is set by /setup password prompt flow
+  // - user is set by /auth/login username/password flow
+  if (req.session?.setupPasswordVerified || req.session?.user) {
     return next();
   }
 
-  // For API calls, return 401
-  if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
-    return res.status(401).json({ error: "Not authenticated" });
+  // If password is set, redirect to password prompt
+  if (isPasswordSet()) {
+    // For API calls, return 401
+    if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    // For page requests, redirect to password prompt
+    return res.redirect("/setup/password-prompt");
   }
 
-  // For page requests, redirect to login
-  return res.redirect("/auth/login");
+  // If GitHub OAuth is not configured and password is not set, redirect to password creation
+  if (!isAuthConfigured() && !isPasswordSet()) {
+    // Allow access to setup to create password
+    if (req.path.startsWith("/setup")) {
+      // Redirect to password creation page
+      return res.redirect("/setup/create-password");
+    }
+  }
+
+  // If GitHub OAuth is configured but user not authenticated
+  if (isAuthConfigured()) {
+    // For API calls, return 401
+    if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    // For page requests, redirect to login
+    return res.redirect("/auth/login");
+  }
+
+  // Fallback: allow access (for initial setup)
+  return next();
 }
 
 // ---------- Express app ----------
@@ -464,9 +897,54 @@ const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1); // trust Railway's reverse proxy for secure cookies
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: false })); // Parse form data for login
+
+// Security headers (prevent clickjacking, XSS, MIME sniffing)
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  next();
+});
 
 // Session middleware
 app.use(session(SESSION_CONFIG));
+
+// Rate limiting for login attempts (in-memory store)
+const loginAttempts = new Map(); // IP -> { count, resetAt }
+
+function rateLimitLogin(req, res, next) {
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  const window = 15 * 60 * 1000; // 15 minutes
+  const maxAttempts = 10;
+
+  const record = loginAttempts.get(ip);
+  
+  if (record && now < record.resetAt) {
+    if (record.count >= maxAttempts) {
+      const retryAfter = Math.ceil((record.resetAt - now) / 1000);
+      res.set("Retry-After", String(retryAfter));
+      return res.status(429).json({ 
+        error: "Too many login attempts. Please try again later.",
+        retryAfter 
+      });
+    }
+  } else if (!record || now >= record.resetAt) {
+    // Reset or initialize
+    loginAttempts.set(ip, { count: 0, resetAt: now + window });
+  }
+
+  next();
+}
+
+function incrementLoginAttempts(req) {
+  const ip = req.ip || req.connection.remoteAddress;
+  const record = loginAttempts.get(ip);
+  if (record) {
+    record.count++;
+  }
+}
 
 // ---------- Auth routes ----------
 
@@ -482,13 +960,11 @@ function loginPageHTML(error) {
     : "";
   const notConfigured = !isAuthConfigured()
     ? `<div class="alert alert-warn">
-        <strong>GitHub OAuth not configured.</strong><br/>
-        Set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> in your Railway variables.<br/>
-        ${isOwnerLockEnabled() ? "Owner-only mode requires OAuth to be configured." : "Optionally set <code>GITHUB_ALLOWED_USERS</code> to restrict access."}
+        <strong>Open Access Mode</strong><br/>
+        Authentication not configured. Anyone with access to this URL can manage your instance.<br/>
+        Set <code>AUTH_PASSWORD</code> in your environment variables to secure access.
       </div>`
     : "";
-  const btnDisabled = !isAuthConfigured() ? "disabled" : "";
-  const btnCls = !isAuthConfigured() ? "btn-github disabled" : "btn-github";
 
   return `<!doctype html>
 <html lang="en">
@@ -552,23 +1028,47 @@ function loginPageHTML(error) {
       font-size: 0.75rem; color: #d4d4d8;
       font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
     }
-    .btn-github {
-      display: flex; align-items: center; justify-content: center; gap: 0.5rem;
-      width: 100%; padding: 0.6875rem 1rem; border-radius: 10px;
-      border: 1px solid #232329; background: #fafafa; color: #09090b;
-      font-size: 0.8125rem; font-weight: 600; cursor: pointer;
-      transition: all 0.15s cubic-bezier(0.4,0,0.2,1);
-      text-decoration: none; position: relative;
-      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.2s both;
+    .form-group {
+      margin-bottom: 1rem;
+      animation: fadeUp 0.45s cubic-bezier(0.4,0,0.2,1) 0.2s both;
     }
-    .btn-github:hover { background: #e4e4e7; box-shadow: 0 2px 12px rgba(250,250,250,0.08); }
-    .btn-github:active { transform: scale(0.98); }
-    .btn-github.disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
-    .btn-github svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .form-group label {
+      display: block;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      margin-bottom: 0.375rem;
+      color: #d4d4d8;
+    }
+    .form-group input {
+      width: 100%;
+      padding: 0.625rem 0.875rem;
+      border-radius: 8px;
+      border: 1px solid #232329;
+      background: #131316;
+      color: #fafafa;
+      font-size: 0.875rem;
+      transition: all 0.15s cubic-bezier(0.4,0,0.2,1);
+    }
+    .form-group input:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+    }
+    .btn-submit {
+      display: flex; align-items: center; justify-content: center;
+      width: 100%; padding: 0.6875rem 1rem; border-radius: 10px;
+      border: none; background: #3b82f6; color: #fafafa;
+      font-size: 0.875rem; font-weight: 600; cursor: pointer;
+      transition: all 0.15s cubic-bezier(0.4,0,0.2,1);
+      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.3s both;
+      margin-top: 1.5rem;
+    }
+    .btn-submit:hover { background: #2563eb; box-shadow: 0 2px 12px rgba(59,130,246,0.3); }
+    .btn-submit:active { transform: scale(0.98); }
     .footer-text {
       text-align: center; margin-top: 2rem; font-size: 0.6875rem; color: #3f3f46;
       display: flex; align-items: center; justify-content: center; gap: 0.375rem;
-      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.3s both;
+      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.4s both;
     }
     .footer-text svg { width: 12px; height: 12px; }
   </style>
@@ -583,13 +1083,20 @@ function loginPageHTML(error) {
     ${errorBlock}
     ${ownerBlock}
     ${notConfigured}
-    <a href="/auth/github" class="${btnCls}" ${btnDisabled}>
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-      Continue with GitHub
-    </a>
+    <form method="POST" action="/auth/login">
+      <div class="form-group">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required autocomplete="current-password" />
+      </div>
+      <button type="submit" class="btn-submit">Sign In</button>
+    </form>
     <p class="footer-text">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-      Secured by GitHub OAuth
+      Secured by username & password
     </p>
   </div>
 </body>
@@ -597,7 +1104,6 @@ function loginPageHTML(error) {
 }
 
 app.get("/auth/login", (req, res) => {
-  // If already logged in, redirect to home
   if (req.session?.user) {
     return res.redirect("/");
   }
@@ -605,78 +1111,65 @@ app.get("/auth/login", (req, res) => {
   res.type("html").send(loginPageHTML(error));
 });
 
-app.get("/auth/github", (req, res) => {
-  if (!isAuthConfigured()) {
-    return res.redirect("/auth/login?error=" + encodeURIComponent("GitHub OAuth not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET."));
+app.post("/auth/login", rateLimitLogin, (req, res) => {
+  const { username, password } = req.body;
+
+  // Validate form data
+  if (!username || !password) {
+    incrementLoginAttempts(req);
+    return res.redirect("/auth/login?error=" + encodeURIComponent("Username and password are required"));
   }
 
-  const state = crypto.randomBytes(16).toString("hex");
-  req.session.oauthState = state;
-
-  const params = new URLSearchParams({
-    client_id: GITHUB_CLIENT_ID,
-    redirect_uri: `${getBaseUrl(req)}/auth/github/callback`,
-    scope: "read:user",
-    state,
-  });
-
-  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
-});
-
-app.get("/auth/github/callback", async (req, res) => {
-  try {
-    const { code, state } = req.query;
-
-    if (!code || !state || state !== req.session.oauthState) {
-      return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid OAuth state. Please try again."));
-    }
-    delete req.session.oauthState;
-
-    // Exchange code for access token
-    const tokenData = await githubFetch("https://github.com/login/oauth/access_token", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code,
-      }),
-    });
-
-    if (!tokenData.access_token) {
-      return res.redirect("/auth/login?error=" + encodeURIComponent("Failed to get access token from GitHub."));
-    }
-
-    // Get user info
-    const user = await githubFetch("https://api.github.com/user", {
-      headers: { authorization: `Bearer ${tokenData.access_token}` },
-    });
-
-    const username = (user.login || "").toLowerCase();
-
-    // Check allowlist
-    if (EFFECTIVE_ALLOWED_USERS.length > 0 && !EFFECTIVE_ALLOWED_USERS.includes(username)) {
-      return res.redirect(
-        "/auth/login?error=" +
-          encodeURIComponent(`Access denied. User "${user.login}" is not in the allowed users list.`),
-      );
-    }
-
-    // Save to session
+  // If auth is not configured, grant "Open Access" session
+  if (!isAuthConfigured()) {
     req.session.user = {
-      id: user.id,
-      login: user.login,
-      avatar: user.avatar_url,
-      name: user.name || user.login,
+      id: "open-access",
+      login: username,
+      name: "Open Access User",
     };
-
-    req.session.save(() => {
+    return req.session.save(() => {
       res.redirect("/setup");
     });
-  } catch (err) {
-    console.error("[auth] GitHub OAuth error:", err);
-    res.redirect("/auth/login?error=" + encodeURIComponent("Authentication failed. Please try again."));
   }
+
+  // Check credentials using constant-time comparison to prevent timing attacks
+  // Pad strings to the same length for timingSafeEqual
+  const maxLen = Math.max(username.length, AUTH_USERNAME.length, password.length, AUTH_PASSWORD.length);
+  const usernameBuf = Buffer.alloc(maxLen);
+  const authUsernameBuf = Buffer.alloc(maxLen);
+  const passwordBuf = Buffer.alloc(maxLen);
+  const authPasswordBuf = Buffer.alloc(maxLen);
+  
+  usernameBuf.write(username);
+  authUsernameBuf.write(AUTH_USERNAME);
+  passwordBuf.write(password);
+  authPasswordBuf.write(AUTH_PASSWORD);
+  
+  let usernameMatch, passwordMatch;
+  try {
+    usernameMatch = crypto.timingSafeEqual(usernameBuf, authUsernameBuf) && username.length === AUTH_USERNAME.length;
+    passwordMatch = crypto.timingSafeEqual(passwordBuf, authPasswordBuf) && password.length === AUTH_PASSWORD.length;
+  } catch (err) {
+    // If comparison fails, treat as mismatch
+    usernameMatch = false;
+    passwordMatch = false;
+  }
+
+  if (usernameMatch && passwordMatch) {
+    // Successful login
+    req.session.user = {
+      id: crypto.randomBytes(8).toString("hex"),
+      login: username,
+      name: username,
+    };
+    return req.session.save(() => {
+      res.redirect("/setup");
+    });
+  }
+
+  // Failed login
+  incrementLoginAttempts(req);
+  return res.redirect("/auth/login?error=" + encodeURIComponent("Invalid username or password"));
 });
 
 app.get("/auth/logout", (req, res) => {
@@ -692,12 +1185,6 @@ app.get("/auth/me", (req, res) => {
   res.json({ user: req.session.user });
 });
 
-function getBaseUrl(req) {
-  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  return `${proto}://${host}`;
-}
-
 // ---------- SETUP_PASSWORD routes ----------
 
 // --- First-run: Create Password ---
@@ -708,10 +1195,17 @@ app.get("/setup/create-password", (req, res) => {
   }
 
   const error = req.query.error || "";
+  const success = req.query.success || "";
+  
   const errorBlock = error
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
+  
+  const successBlock = success
+    ? `<div class="alert alert-success">${escapeHtml(success)}</div>`
+    : "";
 
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -887,7 +1381,8 @@ app.post("/setup/save-password", express.urlencoded({ extended: false }), (req, 
 
   try {
     savePassword(password);
-  } catch {
+  } catch (err) {
+    console.error("[setup] Error in POST /setup/save-password:", err.message);
     return res.redirect("/setup/create-password?error=" + encodeURIComponent("Failed to save password. Check server logs."));
   }
 
@@ -905,6 +1400,7 @@ app.get("/setup/password-prompt", (req, res) => {
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
 
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -1006,6 +1502,18 @@ app.get("/setup/password-prompt", (req, res) => {
     button:active {
       transform: scale(0.98);
     }
+    .link {
+      color: var(--primary);
+      text-decoration: none;
+      font-size: 0.875rem;
+    }
+    .link:hover {
+      text-decoration: underline;
+    }
+    .link-container {
+      text-align: center;
+      margin-top: 1rem;
+    }
   </style>
 </head>
 <body>
@@ -1028,30 +1536,33 @@ app.get("/setup/password-prompt", (req, res) => {
       />
       <button type="submit">Continue</button>
     </form>
+    <div class="link-container">
+      <a href="/setup/forgot-password" class="link">Forgot password?</a>
+    </div>
   </div>
 </body>
 </html>`);
 });
 
 // Simple rate limiter for password verification (prevent brute force)
-const passwordAttempts = new Map();
-const MAX_ATTEMPTS = 5;
-const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const legacyPasswordAttempts = new Map();
+const LEGACY_MAX_ATTEMPTS = 5;
+const LEGACY_ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
 
-function rateLimitPassword(req, res, next) {
+function legacyRateLimitPassword(req, res, next) {
   const clientId = req.ip || req.connection.remoteAddress || "unknown";
   const now = Date.now();
   
-  if (!passwordAttempts.has(clientId)) {
-    passwordAttempts.set(clientId, []);
+  if (!legacyPasswordAttempts.has(clientId)) {
+    legacyPasswordAttempts.set(clientId, []);
   }
   
-  const attempts = passwordAttempts.get(clientId);
+  const attempts = legacyPasswordAttempts.get(clientId);
   // Remove old attempts outside the window
-  const recentAttempts = attempts.filter(time => now - time < ATTEMPT_WINDOW);
-  passwordAttempts.set(clientId, recentAttempts);
+  const recentAttempts = attempts.filter(time => now - time < LEGACY_ATTEMPT_WINDOW);
+  legacyPasswordAttempts.set(clientId, recentAttempts);
   
-  if (recentAttempts.length >= MAX_ATTEMPTS) {
+  if (recentAttempts.length >= LEGACY_MAX_ATTEMPTS) {
     return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
   }
   
@@ -1060,7 +1571,7 @@ function rateLimitPassword(req, res, next) {
   next();
 }
 
-app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ extended: false }), (req, res) => {
+app.post("/setup/verify-password-legacy", legacyRateLimitPassword, express.urlencoded({ extended: false }), (req, res) => {
   const submittedPassword = req.body.password || "";
   
   // Use timing-safe comparison to prevent timing attacks
@@ -1087,17 +1598,1138 @@ app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ exten
   }
 });
 
+// --- Password reset endpoints ---
+app.get("/setup/forgot-password-legacy", (req, res) => {
+  const message = req.query.message || "";
+  const error = req.query.error || "";
+  const messageBlock = message
+    ? `<div class="alert alert-success">${escapeHtml(message)}</div>`
+    : "";
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
+
+  res.set("Cache-Control", "no-store, max-age=0");
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Forgot Password</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --border: #232329;
+      --text: #f4f4f5;
+      --primary: #3b82f6;
+      --error: #ef4444;
+      --success: #22c55e;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 420px;
+      width: 100%;
+    }
+    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; text-align: center; }
+    .subtitle { color: #a1a1aa; font-size: 0.95rem; text-align: center; margin-bottom: 1.5rem; line-height: 1.5; }
+    form { display: flex; flex-direction: column; gap: 1rem; }
+    label { font-size: 0.875rem; font-weight: 500; display: block; margin-bottom: 0.375rem; }
+    input { background: #1c1c21; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; color: var(--text); font-size: 1rem; }
+    input:focus { outline: none; border-color: var(--primary); }
+    button { background: var(--primary); border: none; border-radius: 8px; padding: 0.75rem; color: white; font-weight: 600; cursor: pointer; font-size: 1rem; }
+    button:hover { background: #2563eb; }
+    button:active { transform: scale(0.98); }
+    .alert { padding: 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem; }
+    .alert-error { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
+    .alert-success { background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); color: #86efac; }
+    .link { color: var(--primary); text-decoration: none; }
+    .link:hover { text-decoration: underline; }
+    .back-link { text-align: center; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Forgot Password</h1>
+    <p class="subtitle">Enter your email address to receive a password reset link.</p>
+    ${messageBlock}
+    ${errorBlock}
+    <form method="POST" action="/setup/request-reset-legacy">
+      <label for="email">Email Address</label>
+      <input type="email" id="email" name="email" placeholder="your@email.com" required>
+      <button type="submit">Send Reset Link</button>
+    </form>
+    <div class="back-link">
+      <a href="/setup/password-prompt" class="link">Back to Login</a>
+    </div>
+  </div>
+</body>
+</html>`);
+});
+
+app.post("/setup/request-reset-legacy", express.urlencoded({ extended: false }), (req, res) => {
+  const email = (req.body.email || "").trim().toLowerCase();
+
+  if (!email) {
+    return res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Email is required"));
+  }
+
+  // Generate a reset token
+  const token = crypto.randomBytes(32).toString("hex");
+  const expiresAt = Date.now() + 3600000; // 1 hour
+
+  // Store the token
+  resetTokens[token] = { email, expiresAt };
+  saveResetTokens(resetTokens);
+
+  // Generate reset URL
+  const resetUrl = `${getBaseUrl(req)}/setup/reset-password?token=${encodeURIComponent(token)}`;
+  const resetMessage = `Password reset link: ${resetUrl}`;
+
+  // Send via webhook if configured
+  if (emailConfig.webhookUrl) {
+    fetch(emailConfig.webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: email,
+        subject: "Password Reset Request - OpenClaw Setup",
+        html: `<h2>Password Reset Request</h2><p>Click to reset: <a href="${escapeHtml(resetUrl)}">Reset Password</a></p><p>This link expires in 1 hour.</p>`,
+        resetUrl,
+        expiresAt,
+      }),
+    }).catch((err) => {
+      console.error("[reset] Webhook send error:", err.message);
+    });
+
+    return res.redirect("/setup/forgot-password?message=" + encodeURIComponent("Reset link sent. Check your email."));
+  }
+
+  // Console mode: log the reset link
+  if (emailConfig.consoleMode) {
+    console.log(`\n[reset] PASSWORD RESET LINK FOR ${email}:\n${resetUrl}\n`);
+    return res.redirect("/setup/forgot-password?message=" + encodeURIComponent("Reset link logged to console. Contact your administrator."));
+  }
+
+  // No email service configured
+  res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Email service not configured. Contact your administrator."));
+});
+
+app.get("/setup/reset-password-legacy", (req, res) => {
+  const token = (req.query.token || "").trim();
+  const error = req.query.error || "";
+
+  if (!token) {
+    return res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Invalid or missing reset token"));
+  }
+
+  const resetData = resetTokens[token];
+  if (!resetData || resetData.expiresAt < Date.now()) {
+    // Clean up expired token
+    if (resetData) delete resetTokens[token];
+    saveResetTokens(resetTokens);
+    return res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Reset link has expired. Please request a new one."));
+  }
+
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
+
+  res.set("Cache-Control", "no-store, max-age=0");
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reset Password</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --border: #232329;
+      --text: #f4f4f5;
+      --primary: #3b82f6;
+      --error: #ef4444;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 420px;
+      width: 100%;
+    }
+    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; text-align: center; }
+    .subtitle { color: #a1a1aa; font-size: 0.95rem; text-align: center; margin-bottom: 1.5rem; line-height: 1.5; }
+    form { display: flex; flex-direction: column; gap: 1rem; }
+    label { font-size: 0.875rem; font-weight: 500; display: block; margin-bottom: 0.375rem; }
+    input { background: #1c1c21; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; color: var(--text); font-size: 1rem; font-family: monospace; }
+    input:focus { outline: none; border-color: var(--primary); }
+    button { background: var(--primary); border: none; border-radius: 8px; padding: 0.75rem; color: white; font-weight: 600; cursor: pointer; font-size: 1rem; }
+    button:hover { background: #2563eb; }
+    button:active { transform: scale(0.98); }
+    .alert { padding: 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem; }
+    .alert-error { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
+    .link { color: var(--primary); text-decoration: none; }
+    .link:hover { text-decoration: underline; }
+    .back-link { text-align: center; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Reset Password</h1>
+    <p class="subtitle">Enter a new password for your OpenClaw setup.</p>
+    ${errorBlock}
+    <form method="POST" action="/setup/confirm-reset-legacy">
+      <input type="hidden" name="token" value="${escapeHtml(token)}">
+      <label for="password">New Password</label>
+      <input type="password" id="password" name="password" placeholder="At least 8 characters" required>
+      <label for="confirm">Confirm Password</label>
+      <input type="password" id="confirm" name="confirm" placeholder="Repeat password" required>
+      <button type="submit">Reset Password</button>
+    </form>
+    <div class="back-link">
+      <a href="/setup/password-prompt" class="link">Back to Login</a>
+    </div>
+  </div>
+  
+  <script>
+    const form = document.getElementById('createForm');
+    const password = document.getElementById('password');
+    const confirmPassword = document.getElementById('confirmPassword');
+    const validationMsg = document.getElementById('validationMsg');
+    const submitBtn = document.getElementById('submitBtn');
+    
+    function validatePasswords() {
+      const pwd = password.value;
+      const confirm = confirmPassword.value;
+      
+      // Clear previous validation
+      validationMsg.classList.remove('show', 'error', 'success');
+      password.classList.remove('error');
+      confirmPassword.classList.remove('error');
+      submitBtn.disabled = false;
+      
+      if (pwd.length === 0 && confirm.length === 0) {
+        return;
+      }
+      
+      if (pwd.length > 0 && pwd.length < 8) {
+        validationMsg.textContent = 'Password must be at least 8 characters';
+        validationMsg.classList.add('show', 'error');
+        password.classList.add('error');
+        submitBtn.disabled = true;
+        return;
+      }
+      
+      if (confirm.length > 0 && pwd !== confirm) {
+        validationMsg.textContent = 'Passwords do not match';
+        validationMsg.classList.add('show', 'error');
+        confirmPassword.classList.add('error');
+        submitBtn.disabled = true;
+        return;
+      }
+      
+      if (pwd.length >= 8 && pwd === confirm && confirm.length > 0) {
+        validationMsg.textContent = 'Passwords match ✓';
+        validationMsg.classList.add('show', 'success');
+      }
+    }
+    
+    password.addEventListener('input', validatePasswords);
+    confirmPassword.addEventListener('input', validatePasswords);
+    
+    form.addEventListener('submit', (e) => {
+      const pwd = password.value;
+      const confirm = confirmPassword.value;
+      
+      if (pwd.length < 8) {
+        e.preventDefault();
+        alert('Password must be at least 8 characters');
+        return;
+      }
+      
+      if (pwd !== confirm) {
+        e.preventDefault();
+        alert('Passwords do not match');
+        return;
+      }
+    });
+  </script>
+</body>
+</html>`);
+});
+
+// Handle password creation
+app.post("/setup/create-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
+  // If password is already set, don't allow creating a new one this way
+  if (isPasswordSet()) {
+    return res.redirect("/setup/password-prompt");
+  }
+
+  const { password, confirmPassword } = req.body;
+
+  // Validate
+  if (!password || !confirmPassword) {
+    return res.redirect("/setup/create-password?error=" + encodeURIComponent("Both fields are required"));
+  }
+
+  if (password.length < 8) {
+    return res.redirect("/setup/create-password?error=" + encodeURIComponent("Password must be at least 8 characters"));
+  }
+
+  if (password !== confirmPassword) {
+    return res.redirect("/setup/create-password?error=" + encodeURIComponent("Passwords do not match"));
+  }
+
+  try {
+    // Hash password with bcrypt (cost factor 12)
+    const hash = await bcrypt.hash(password, 12);
+    
+    // Save to file with secure permissions
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(passwordHashPath(), hash, { encoding: "utf8", mode: 0o600 });
+    
+    // Immediately authenticate the user
+    req.session.setupPasswordVerified = true;
+    
+    req.session.save(() => {
+      res.redirect("/setup");
+    });
+  } catch (err) {
+    console.error("[setup] Failed to create password:", err);
+    res.redirect("/setup/create-password?error=" + encodeURIComponent("Failed to create password. Please try again."));
+  }
+});
+
+app.get("/setup/password-prompt", (req, res) => {
+  const error = req.query.error || "";
+  const success = req.query.success || "";
+  
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
+  
+  const successBlock = success
+    ? `<div class="alert alert-success">${escapeHtml(success)}</div>`
+    : "";
+  
+  const githubEnabled = isAuthConfigured();
+  const githubSection = githubEnabled ? `
+    <div class="divider">
+      <span>or</span>
+    </div>
+    <a href="/auth/github" class="btn-github">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      Continue with GitHub
+    </a>
+  ` : '';
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign In - Setup Panel</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --surface-2: #1c1c21;
+      --border: #232329;
+      --text: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --error: #ef4444;
+      --success: #22c55e;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 420px;
+      width: 100%;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+    .subtitle {
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+    }
+    .alert {
+      padding: 0.875rem;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+    .alert-error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+    }
+    .alert-success {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      color: #86efac;
+    }
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 1rem;
+      font-family: inherit;
+      margin-bottom: 0.75rem;
+      transition: border-color 0.2s;
+    }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: inherit;
+    }
+    button:hover {
+      background: var(--primary-hover);
+    }
+    button:active {
+      transform: scale(0.98);
+    }
+    .forgot-link {
+      display: block;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.875rem;
+      text-decoration: none;
+      margin-top: 1rem;
+      transition: color 0.2s;
+    }
+    .forgot-link:hover {
+      color: var(--primary);
+    }
+    .divider {
+      display: flex;
+      align-items: center;
+      margin: 1.5rem 0;
+      color: var(--text-dim);
+      font-size: 0.875rem;
+    }
+    .divider::before,
+    .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+    .divider span {
+      padding: 0 1rem;
+    }
+    .btn-github {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-decoration: none;
+    }
+    .btn-github:hover {
+      background: var(--surface);
+      border-color: var(--primary);
+    }
+    .btn-github svg {
+      width: 20px;
+      height: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔐 Sign In</h1>
+    <p class="subtitle">Enter your password to access the setup panel</p>
+    ${errorBlock}${successBlock}
+    <form method="POST" action="/setup/verify-password">
+      <label for="password">Password</label>
+      <input 
+        type="password" 
+        id="password" 
+        name="password" 
+        autocomplete="current-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        required 
+        autofocus 
+      />
+      <button type="submit">Sign In</button>
+    </form>
+    <a href="/setup/forgot-password" class="forgot-link">Forgot Password?</a>
+    ${githubSection}
+  </div>
+</body>
+</html>`);
+});
+
+// Simple rate limiter for password operations (prevent brute force)
+const passwordAttempts = new Map();
+const MAX_ATTEMPTS = 5;
+const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15 minutes
+
+function rateLimitPassword(req, res, next) {
+  const clientId = req.ip || req.connection.remoteAddress || "unknown";
+  const now = Date.now();
+  
+  if (!passwordAttempts.has(clientId)) {
+    passwordAttempts.set(clientId, []);
+  }
+  
+  const attempts = passwordAttempts.get(clientId);
+  // Remove old attempts outside the window
+  const recentAttempts = attempts.filter(time => now - time < ATTEMPT_WINDOW);
+  passwordAttempts.set(clientId, recentAttempts);
+  
+  if (recentAttempts.length >= MAX_ATTEMPTS) {
+    // For GET requests, redirect with error
+    if (req.method === 'GET' || req.method === 'get') {
+      return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
+    }
+    // For POST requests, redirect with error
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Too many attempts. Please try again later."));
+  }
+  
+  // Record this attempt
+  recentAttempts.push(now);
+  next();
+}
+
+app.post("/setup/verify-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
+  const submittedPassword = req.body.password || "";
+  
+  try {
+    // Read the password hash from file (with 5-minute cache to reduce I/O)
+    let hash = getCachedPassword();
+    if (!hash) {
+      hash = fs.readFileSync(passwordHashPath(), "utf8").trim();
+      setCachedPassword(hash);
+    }
+    
+    // Use bcrypt to compare (timing-safe by default)
+    const isValid = await bcrypt.compare(submittedPassword, hash);
+    
+    if (isValid) {
+      req.session.setupPasswordVerified = true;
+      req.session.save(() => {
+        res.redirect("/setup");
+      });
+    } else {
+      res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Incorrect password"));
+    }
+  } catch (err) {
+    console.error("[setup] Password verification error:", err);
+    res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Incorrect password"));
+  }
+});
+
+// Forgot password page
+app.get("/setup/forgot-password", (req, res) => {
+  const emailConfigured = Boolean(ADMIN_EMAIL && SMTP_HOST && SMTP_USER && SMTP_PASS);
+  
+  const helpText = !emailConfigured ? `
+    <div class="alert alert-info">
+      <strong>Email not configured</strong><br>
+      To use password reset, configure these environment variables in Railway:
+      <ul style="margin-top: 0.5rem; padding-left: 1.5rem;">
+        <li><code>ADMIN_EMAIL</code> - Your email address</li>
+        <li><code>SMTP_HOST</code> - SMTP server (e.g., smtp.gmail.com)</li>
+        <li><code>SMTP_PORT</code> - Usually 587</li>
+        <li><code>SMTP_USER</code> - SMTP username</li>
+        <li><code>SMTP_PASS</code> - SMTP password or app password</li>
+      </ul>
+      <p style="margin-top: 0.75rem;">
+        <strong>Alternative:</strong> If you have Railway CLI access, you can manually reset by deleting the password hash file from the state directory.
+      </p>
+    </div>
+  ` : '';
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Forgot Password</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --surface-2: #1c1c21;
+      --border: #232329;
+      --text: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --info: #0ea5e9;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 520px;
+      width: 100%;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+    .subtitle {
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .alert {
+      padding: 1rem;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      line-height: 1.6;
+    }
+    .alert-info {
+      background: rgba(14, 165, 233, 0.1);
+      border: 1px solid rgba(14, 165, 233, 0.3);
+      color: #7dd3fc;
+    }
+    .alert ul {
+      list-style: disc;
+    }
+    .alert code {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 0.125rem 0.375rem;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 0.8125rem;
+    }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: inherit;
+      margin-bottom: 1rem;
+    }
+    button:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    button:active:not(:disabled) {
+      transform: scale(0.98);
+    }
+    .back-link {
+      display: block;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.875rem;
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .back-link:hover {
+      color: var(--primary);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔑 Forgot Password</h1>
+    <p class="subtitle">Request a password reset link via email</p>
+    ${helpText}
+    <form method="POST" action="/setup/forgot-password">
+      <button type="submit" ${!emailConfigured ? 'disabled' : ''}>
+        ${emailConfigured ? 'Send Reset Link' : 'Email Not Configured'}
+      </button>
+    </form>
+    <a href="/setup/password-prompt" class="back-link">← Back to Sign In</a>
+  </div>
+</body>
+</html>`);
+});
+
+// Handle forgot password submission
+app.post("/setup/forgot-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
+  const emailConfigured = Boolean(ADMIN_EMAIL && SMTP_HOST && SMTP_USER && SMTP_PASS);
+  
+  if (!emailConfigured) {
+    return res.redirect("/setup/forgot-password");
+  }
+
+  try {
+    // Generate reset token
+    const { token, hash } = generateResetToken();
+    
+    // Save token hash with expiry
+    if (!saveResetToken(hash)) {
+      throw new Error("Failed to save reset token");
+    }
+    
+    // Send email
+    const resetLink = `${getBaseUrl(req)}/setup/reset-password?token=${token}`;
+    await sendResetEmail(resetLink);
+    
+    // Redirect with success message (generic message for security)
+    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
+  } catch (err) {
+    console.error("[reset] Failed to send reset email:", err);
+    // Don't reveal error details for security - use same message
+    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("If your email is configured, you will receive a reset link shortly."));
+  }
+});
+
+// Reset password page
+app.get("/setup/reset-password", (req, res) => {
+  const token = req.query.token || "";
+  
+  if (!token) {
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Invalid reset link"));
+  }
+  
+  // Verify token
+  const verification = verifyResetToken(token);
+  
+  if (!verification.valid) {
+    let errorMsg = "Invalid or expired reset link";
+    if (verification.reason === "expired") {
+      errorMsg = "Reset link has expired. Please request a new one.";
+    }
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent(errorMsg));
+  }
+
+  const error = req.query.error || "";
+  const errorBlock = error
+    ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
+    : "";
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reset Password</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #09090b;
+      --surface: #131316;
+      --surface-2: #1c1c21;
+      --border: #232329;
+      --text: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --error: #ef4444;
+      --success: #22c55e;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 480px;
+      width: 100%;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+    .subtitle {
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 1rem;
+      font-family: inherit;
+      margin-bottom: 1.5rem;
+      transition: border-color 0.2s;
+    }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    input[type="password"].error {
+      border-color: var(--error);
+    }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: inherit;
+    }
+    button:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    button:active:not(:disabled) {
+      transform: scale(0.98);
+    }
+    .hint {
+      font-size: 0.8125rem;
+      color: var(--text-dim);
+      margin-top: -1rem;
+      margin-bottom: 1.5rem;
+    }
+    .validation-msg {
+      font-size: 0.8125rem;
+      margin-top: -1rem;
+      margin-bottom: 1rem;
+      padding: 0.5rem;
+      border-radius: 6px;
+      display: none;
+    }
+    .validation-msg.show {
+      display: block;
+    }
+    .validation-msg.error {
+      background: rgba(239, 68, 68, 0.1);
+      color: #fca5a5;
+    }
+    .validation-msg.success {
+      background: rgba(34, 197, 94, 0.1);
+      color: #86efac;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔑 Reset Password</h1>
+    <p class="subtitle">Choose a new password for your setup panel</p>
+    ${errorBlock}
+    <form method="POST" action="/setup/reset-password" id="resetForm">
+      <input type="hidden" name="token" value="${escapeHtml(token)}" />
+      
+      <label for="password">New Password</label>
+      <input 
+        type="password" 
+        id="password" 
+        name="password" 
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        minlength="8"
+        required 
+        autofocus 
+      />
+      <p class="hint">Minimum 8 characters</p>
+      
+      <label for="confirmPassword">Confirm Password</label>
+      <input 
+        type="password" 
+        id="confirmPassword" 
+        name="confirmPassword" 
+        autocomplete="new-password"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        minlength="8"
+        required 
+      />
+      
+      <div id="validationMsg" class="validation-msg"></div>
+      
+      <button type="submit" id="submitBtn">Reset Password</button>
+    </form>
+  </div>
+  
+  <script>
+    const form = document.getElementById('resetForm');
+    const password = document.getElementById('password');
+    const confirmPassword = document.getElementById('confirmPassword');
+    const validationMsg = document.getElementById('validationMsg');
+    const submitBtn = document.getElementById('submitBtn');
+    
+    function validatePasswords() {
+      const pwd = password.value;
+      const confirm = confirmPassword.value;
+      
+      validationMsg.classList.remove('show', 'error', 'success');
+      password.classList.remove('error');
+      confirmPassword.classList.remove('error');
+      submitBtn.disabled = false;
+      
+      if (pwd.length === 0 && confirm.length === 0) {
+        return;
+      }
+      
+      if (pwd.length > 0 && pwd.length < 8) {
+        validationMsg.textContent = 'Password must be at least 8 characters';
+        validationMsg.classList.add('show', 'error');
+        password.classList.add('error');
+        submitBtn.disabled = true;
+        return;
+      }
+      
+      if (confirm.length > 0 && pwd !== confirm) {
+        validationMsg.textContent = 'Passwords do not match';
+        validationMsg.classList.add('show', 'error');
+        confirmPassword.classList.add('error');
+        submitBtn.disabled = true;
+        return;
+      }
+      
+      if (pwd.length >= 8 && pwd === confirm && confirm.length > 0) {
+        validationMsg.textContent = 'Passwords match ✓';
+        validationMsg.classList.add('show', 'success');
+      }
+    }
+    
+    password.addEventListener('input', validatePasswords);
+    confirmPassword.addEventListener('input', validatePasswords);
+    
+    form.addEventListener('submit', (e) => {
+      const pwd = password.value;
+      const confirm = confirmPassword.value;
+      
+      if (pwd.length < 8) {
+        e.preventDefault();
+        alert('Password must be at least 8 characters');
+        return;
+      }
+      
+      if (pwd !== confirm) {
+        e.preventDefault();
+        alert('Passwords do not match');
+        return;
+      }
+    });
+  </script>
+</body>
+</html>`);
+});
+
+// Handle reset password submission
+app.post("/setup/reset-password", rateLimitPassword, express.urlencoded({ extended: false }), async (req, res) => {
+  const { token, password, confirmPassword } = req.body;
+  
+  if (!token) {
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent("Invalid reset link"));
+  }
+  
+  // Verify token
+  const verification = verifyResetToken(token);
+  
+  if (!verification.valid) {
+    let errorMsg = "Invalid or expired reset link";
+    if (verification.reason === "expired") {
+      errorMsg = "Reset link has expired. Please request a new one.";
+    }
+    return res.redirect("/setup/password-prompt?error=" + encodeURIComponent(errorMsg));
+  }
+  
+  // Validate password - instead of redirecting with token in URL, re-render the page with error
+  if (!password || !confirmPassword) {
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Both fields are required"));
+  }
+  
+  if (password.length < 8) {
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Password must be at least 8 characters"));
+  }
+  
+  if (password !== confirmPassword) {
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Passwords do not match"));
+  }
+  
+  try {
+    // Hash new password with bcrypt (cost factor 12)
+    const hash = await bcrypt.hash(password, 12);
+    
+    // Save to file with secure permissions
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(passwordHashPath(), hash, { encoding: "utf8", mode: 0o600 });
+    
+    // Invalidate the reset token
+    invalidateResetToken();
+    
+    // Redirect to login with success message
+    res.redirect("/setup/password-prompt?success=" + encodeURIComponent("Password reset successfully. Please sign in with your new password."));
+  } catch (err) {
+    console.error("[reset] Failed to reset password:", err);
+    // Re-render with error instead of redirecting with token in URL
+    return res.redirect(`/setup/reset-password?token=${token}&error=` + encodeURIComponent("Failed to reset password. Please try again."));
+  }
+});
+
+app.post("/setup/confirm-reset-legacy", express.urlencoded({ extended: false }), (req, res) => {
+  const token = (req.body.token || "").trim();
+  const password = req.body.password || "";
+  const confirm = req.body.confirm || "";
+
+  const resetData = resetTokens[token];
+  if (!resetData || resetData.expiresAt < Date.now()) {
+    return res.redirect("/setup/forgot-password?error=" + encodeURIComponent("Reset link has expired"));
+  }
+
+  if (password.length < 8) {
+    return res.redirect("/setup/reset-password?token=" + encodeURIComponent(token) + "&error=" + encodeURIComponent("Password must be at least 8 characters"));
+  }
+
+  if (password !== confirm) {
+    return res.redirect("/setup/reset-password?token=" + encodeURIComponent(token) + "&error=" + encodeURIComponent("Passwords do not match"));
+  }
+
+  try {
+    savePassword(password);
+    // Clean up the token after use
+    delete resetTokens[token];
+    saveResetTokens(resetTokens);
+
+    res.redirect("/setup/password-prompt?message=" + encodeURIComponent("Password reset successfully. Please log in with your new password."));
+  } catch (err) {
+    console.error("[reset] Error saving password:", err);
+    res.redirect("/setup/reset-password?token=" + encodeURIComponent(token) + "&error=" + encodeURIComponent("Failed to reset password. Please try again."));
+  }
+});
+
 // Minimal health endpoint for Railway - must be public
 app.get("/setup/healthz", (_req, res) => res.json({ ok: true }));
 
-// Apply SETUP_PASSWORD auth to /setup routes (before GitHub OAuth)
+// Apply SETUP_PASSWORD auth to /setup routes (before username/password auth)
 app.use("/setup", requireSetupPassword);
 
-// Apply auth to all routes below
+// Apply username/password auth to all routes below
 app.use(requireAuth);
 
 app.get("/setup/app.js", (_req, res) => {
   // Serve JS for /setup (kept external to avoid inline encoding/template issues)
+  // Prevent stale browser caches after deploys so onboarding UX updates appear immediately.
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("application/javascript");
   res.send(fs.readFileSync(path.join(process.cwd(), "src", "setup-app.js"), "utf8"));
 });
@@ -1105,10 +2737,13 @@ app.get("/setup/app.js", (_req, res) => {
 app.get("/setup", (req, res) => {
   const user = req.session?.user;
   const avatarHtml = user
-    ? `<img src="${escapeHtml(user.avatar)}" alt="" class="avatar" /><span class="user-name">${escapeHtml(user.name || user.login)}</span>`
+    ? user.avatar 
+      ? `<img src="${escapeHtml(user.avatar)}" alt="" class="avatar" /><span class="user-name">${escapeHtml(user.name || user.login)}</span>`
+      : `<div class="avatar-placeholder"></div><span class="user-name">${escapeHtml(user.name || user.login)}</span>`
     : "";
   const signOutHtml = user ? `<a href="/auth/logout" class="nav-link">Sign out</a>` : "";
 
+  res.set("Cache-Control", "no-store, max-age=0");
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -1201,6 +2836,11 @@ app.get("/setup", (req, res) => {
     .topbar-sep { width: 1px; height: 16px; background: var(--border); margin: 0 0.25rem; }
     .topbar-page { font-size: 0.8125rem; color: var(--text-dim); font-weight: 400; }
     .avatar { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); }
+    .avatar-placeholder { 
+      width: 22px; height: 22px; border-radius: 50%; 
+      background: var(--surface-2); border: 1px solid var(--border);
+      display: inline-block;
+    }
     .user-name { font-size: 0.75rem; color: var(--text-dim); }
     .topbar-right { display: flex; align-items: center; gap: 0.75rem; }
     .nav-link { font-size: 0.75rem; color: var(--text-dim); text-decoration: none; transition: color 0.15s; }
@@ -1398,6 +3038,35 @@ app.get("/setup", (req, res) => {
 
     .separator { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
 
+
+    /* ---- Setup stages ---- */
+    .stage-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1rem; margin-bottom: 0.875rem;
+    }
+    .stage-title { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.625rem; }
+    .stage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+    .stage-item {
+      display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.625rem;
+      border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg);
+      font-size: 0.75rem; color: var(--text-dim);
+    }
+    .stage-dot { width: 8px; height: 8px; border-radius: 50%; background: #52525b; flex-shrink: 0; }
+    .stage-item.current { border-color: var(--border-focus); color: var(--text); }
+    .stage-item.current .stage-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
+    .stage-item.done .stage-dot { background: var(--success); box-shadow: 0 0 0 3px var(--success-muted); }
+    .stage-item.error .stage-dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-muted); }
+    .preflight-box {
+      display: none; margin-bottom: 0.875rem; padding: 0.75rem 0.875rem;
+      border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
+      font-size: 0.75rem;
+    }
+    .preflight-box.visible { display: block; }
+    .preflight-box h4 { margin: 0 0 0.5rem; font-size: 0.75rem; color: var(--text-muted); }
+    .preflight-list { margin: 0; padding-left: 1rem; color: var(--text-dim); }
+    .preflight-list li { margin-bottom: 0.375rem; }
+    .preflight-list .warn { color: #facc15; }
+    .preflight-list .err { color: #f87171; }
     /* ---- Empty state ---- */
     .empty-hint {
       text-align: center; padding: 2rem 1rem; color: var(--text-dim); font-size: 0.8125rem;
@@ -1437,6 +3106,8 @@ app.get("/setup", (req, res) => {
       </a>
       <div class="topbar-sep"></div>
       <span class="topbar-page">Setup</span>
+      <span class="topbar-sep"></span>
+      <span class="status-version" title="Deployed UI version">${escapeHtml(SETUP_UI_VERSION.slice(0, 12))}</span>
     </div>
     <div class="topbar-right">
       ${avatarHtml}
@@ -1513,11 +3184,27 @@ app.get("/setup", (req, res) => {
         <input type="hidden" id="flow" value="quickstart" />
       </div>
 
+      <div class="stage-card animate-in animate-in-delay-1">
+        <div class="stage-title">Setup progress</div>
+        <div class="stage-grid" id="stageGrid">
+          <div class="stage-item current" id="stage-validate"><span class="stage-dot"></span><span>Validate</span></div>
+          <div class="stage-item" id="stage-configure"><span class="stage-dot"></span><span>Configure</span></div>
+          <div class="stage-item" id="stage-deploy"><span class="stage-dot"></span><span>Deploy</span></div>
+          <div class="stage-item" id="stage-verify"><span class="stage-dot"></span><span>Verify</span></div>
+        </div>
+      </div>
+
+      <div class="preflight-box" id="preflightBox">
+        <h4>Preflight checks</h4>
+        <ul class="preflight-list" id="preflightList"></ul>
+      </div>
+
       <div class="actions animate-in animate-in-delay-1" style="margin-bottom:0.875rem;">
         <button class="btn btn-primary" id="run">
           <span class="spinner"></span>
           <span class="btn-label">Deploy Configuration</span>
         </button>
+        <button class="btn btn-secondary" id="preflightRun">Run Preflight</button>
         <button class="btn btn-ghost" id="reset">Reset</button>
       </div>
 
@@ -1693,18 +3380,27 @@ app.get("/setup", (req, res) => {
 
   </main>
 
-  <script src="/setup/app.js"></script>
+  <script src="/setup/app.js?v=${encodeURIComponent(SETUP_UI_VERSION)}"></script>
 </body>
 </html>`);
 });
 
 app.get("/setup/api/status", async (_req, res) => {
-  const version = await runCmd(OPENCLAW_NODE, clawArgs(["--version"]));
+  try {
+    const version = await runCmd(OPENCLAW_NODE, clawArgs(["--version"]));
 
-  res.json({
-    configured: isConfigured(),
-    openclawVersion: version.output.trim(),
-  });
+    res.json({
+      configured: isConfigured(),
+      openclawVersion: version.output.trim(),
+    });
+  } catch (err) {
+    console.error("[/setup/api/status] error:", err);
+    res.status(500).json({ 
+      ok: false, 
+      error: "Failed to get status",
+      configured: isConfigured() 
+    });
+  }
 });
 
 function buildOnboardArgs(payload) {
@@ -1775,9 +3471,6 @@ function runCmd(cmd, args, opts = {}) {
         ...process.env,
         OPENCLAW_STATE_DIR: STATE_DIR,
         OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-        // Backward-compat aliases
-        CLAWDBOT_STATE_DIR: process.env.CLAWDBOT_STATE_DIR || STATE_DIR,
-        CLAWDBOT_WORKSPACE_DIR: process.env.CLAWDBOT_WORKSPACE_DIR || WORKSPACE_DIR,
       },
     });
 
@@ -1810,6 +3503,162 @@ function runCmd(cmd, args, opts = {}) {
   });
 }
 
+function getProviderKeyHint(authChoice = "") {
+  if (authChoice === "openai-api-key") return "OpenAI keys usually start with sk-.";
+  if (authChoice === "openrouter-api-key") return "OpenRouter keys usually start with sk-or-v1-.";
+  if (authChoice === "apiKey") return "Anthropic keys usually start with sk-ant-.";
+  if (authChoice === "gemini-api-key") return "Gemini keys are long API key strings from Google AI Studio.";
+  return "Verify the provider key and try again.";
+}
+
+
+function sendSetupError(res, status, code, message, action, details) {
+  return res.status(status).json({
+    ok: false,
+    error: {
+      code,
+      message,
+      action,
+      details: details || null,
+    },
+  });
+}
+
+function classifyOnboardFailure(output = "") {
+  const text = String(output || "").toLowerCase();
+
+  if (text.includes("invalid") && text.includes("api key")) {
+    return {
+      code: "PROVIDER_AUTH_FAILED",
+      message: "Provider authentication failed during onboarding.",
+      action: "Verify provider selection and API key, then run Preflight again.",
+    };
+  }
+
+  if (text.includes("permission denied") || text.includes("eacces") || text.includes("readonly")) {
+    return {
+      code: "STORAGE_PERMISSION_ERROR",
+      message: "OpenClaw could not write required files.",
+      action: "Check OPENCLAW_STATE_DIR/OPENCLAW_WORKSPACE_DIR and volume mount permissions.",
+    };
+  }
+
+  if (text.includes("timeout") || text.includes("timed out")) {
+    return {
+      code: "ONBOARD_TIMEOUT",
+      message: "Onboarding timed out before completion.",
+      action: "Retry once; if it repeats, check network/provider connectivity and logs.",
+    };
+  }
+
+  return {
+    code: "ONBOARD_FAILED",
+    message: "OpenClaw onboarding did not complete successfully.",
+    action: "Review setup output log, fix highlighted issues, and retry deployment.",
+  };
+}
+
+app.post("/setup/api/preflight", async (req, res) => {
+  const payload = req.body || {};
+  const checks = [];
+  const errors = [];
+  const warnings = [];
+
+  const addCheck = (name, ok, message, action, severity = "error") => {
+    checks.push({ name, ok, message, action, severity });
+    if (ok) return;
+    if (severity === "warning") warnings.push({ name, message, action });
+    else errors.push({ name, message, action });
+  };
+
+  const authChoice = (payload.authChoice || "").trim();
+  const authSecret = (payload.authSecret || "").trim();
+  const model = (payload.model || "").trim();
+
+  const needsSecret = authChoice !== "claude-cli" && authChoice !== "codex-cli";
+  addCheck(
+    "providerKey",
+    !needsSecret || Boolean(authSecret),
+    "Provider credential is required for this auth mode.",
+    "Paste a valid API key in the Auth Secret field before deploying.",
+  );
+
+  const providerPatterns = {
+    "openai-api-key": /^sk-/,
+    "openrouter-api-key": /^sk-or-v1-/,
+    apiKey: /^sk-ant-/,
+  };
+  if (needsSecret && providerPatterns[authChoice]) {
+    addCheck(
+      "providerKeyFormat",
+      providerPatterns[authChoice].test(authSecret),
+      "Provider key format looks invalid.",
+      getProviderKeyHint(authChoice),
+      "warning",
+    );
+  }
+
+  const providerNeedsModel = new Set([
+    "openrouter-api-key",
+    "openai-api-key",
+    "gemini-api-key",
+    "ai-gateway-api-key",
+    "apiKey",
+  ]);
+  if (providerNeedsModel.has(authChoice)) {
+    addCheck(
+      "model",
+      Boolean(model),
+      "Model is recommended for this provider.",
+      "Set a model value (for example gpt-4o or anthropic/claude-sonnet-4).",
+      "warning",
+    );
+  }
+
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    addCheck("stateDir", true, `State directory ready: ${STATE_DIR}`, "");
+  } catch (err) {
+    addCheck(
+      "stateDir",
+      false,
+      `Cannot create state directory: ${STATE_DIR}`,
+      "Ensure OPENCLAW_STATE_DIR points to a writable volume path.",
+    );
+  }
+
+  try {
+    fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+    addCheck("workspaceDir", true, `Workspace directory ready: ${WORKSPACE_DIR}`, "");
+  } catch (err) {
+    addCheck(
+      "workspaceDir",
+      false,
+      `Cannot create workspace directory: ${WORKSPACE_DIR}`,
+      "Ensure OPENCLAW_WORKSPACE_DIR points to a writable volume path.",
+    );
+  }
+
+  if (STATE_DIR.startsWith("/data") || WORKSPACE_DIR.startsWith("/data")) {
+    addCheck(
+      "dataMount",
+      fs.existsSync("/data"),
+      "Expected Railway volume mount at /data was not found.",
+      "Attach a Railway Volume mounted at /data and redeploy.",
+    );
+  } else {
+    addCheck(
+      "dataMount",
+      false,
+      "State/workspace are not under /data; persistence may be lost on redeploy.",
+      "Set OPENCLAW_STATE_DIR=/data/.openclaw and OPENCLAW_WORKSPACE_DIR=/data/workspace.",
+      "warning",
+    );
+  }
+
+  return res.json({ ok: errors.length === 0, errors, warnings, checks });
+});
+
 app.post("/setup/api/run", async (req, res) => {
   try {
     if (isConfigured()) {
@@ -1817,44 +3666,84 @@ app.post("/setup/api/run", async (req, res) => {
       return res.json({ ok: true, output: "Already configured.\nUse Reset setup if you want to rerun onboarding.\n" });
     }
 
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
-  const payload = req.body || {};
-  const onboardArgs = buildOnboardArgs(payload);
-  const onboard = await runCmd(OPENCLAW_NODE, clawArgs(onboardArgs));
+    const payload = req.body || {};
 
-  let extra = "";
+    const preflightBlockingErrors = [];
+    if ((payload.authChoice || "") !== "claude-cli" && (payload.authChoice || "") !== "codex-cli" && !(payload.authSecret || "").trim()) {
+      preflightBlockingErrors.push("Provider credential is required for this auth mode.");
+    }
+    if (preflightBlockingErrors.length) {
+      return sendSetupError(
+        res,
+        400,
+        "PRECONDITION_FAILED",
+        "Cannot start onboarding due to missing required setup input.",
+        "Run Preflight, fix blockers, and retry deployment.",
+        { blockers: preflightBlockingErrors },
+      );
+    }
 
-  const ok = onboard.code === 0 && isConfigured();
+    const onboardArgs = buildOnboardArgs(payload);
+    const onboard = await runCmd(OPENCLAW_NODE, clawArgs(onboardArgs));
 
-  // Optional channel setup (only after successful onboarding, and only if the installed CLI supports it).
-  if (ok) {
+    let extra = "";
+    const ok = onboard.code === 0 && isConfigured();
+
+    if (!ok) {
+      const classified = classifyOnboardFailure(onboard.output);
+      return sendSetupError(
+        res,
+        500,
+        classified.code,
+        classified.message,
+        classified.action,
+        {
+          commandExitCode: onboard.code,
+          outputPreview: (onboard.output || "").slice(0, 3000),
+        },
+      );
+    }
+
+    // Optional channel setup (only after successful onboarding, and only if the installed CLI supports it).
     // The internal gateway uses token auth with the wrapper's known token.
-    // OpenClaw 2026.2.4+ rejects "none" as a gateway.auth.mode value.
+    // Only use nested keys (gateway.auth.mode / gateway.auth.token);
+    // the flat "gateway.authMode" key is unrecognized by OpenClaw and crashes the gateway.
+    // Remove legacy authMode key directly from the JSON file
+    // ("config unset" may not be a valid CLI command in all OpenClaw versions).
+    try {
+      const cfgFile = configPath();
+      const cfgRaw = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+      if (cfgRaw.gateway && "authMode" in cfgRaw.gateway) {
+        delete cfgRaw.gateway.authMode;
+        fs.writeFileSync(cfgFile, JSON.stringify(cfgRaw, null, 2), "utf8");
+        console.log("[setup] removed legacy gateway.authMode from config");
+      }
+    } catch (e) {
+      console.warn("[setup] could not clean authMode:", e.message);
+    }
     const cfgOpts = { timeoutMs: 10_000 };
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.authMode", "token"]), cfgOpts);
+    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.mode", "token"]), cfgOpts);
+    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]), cfgOpts);
     await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.bind", "loopback"]), cfgOpts);
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.port", String(INTERNAL_GATEWAY_PORT)]), cfgOpts);
-
-    // Ensure model is written into config (important for OpenRouter where the CLI may not
-    // recognise --model during non-interactive onboarding).
-    const modelVal = (payload.model || "").trim();
+    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.port", String(INTERNAL_GATEWAY_PORT)]), cfgOpts);    const modelVal = (payload.model || "").trim();
     if (modelVal) {
       const setModel = await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "model", modelVal]));
-      extra += `\n[model] set to ${modelVal} (exit=${setModel.code})\n`;
+      extra += `
+[model] set to ${modelVal} (exit=${setModel.code})
+`;
     }
 
     const channelsHelp = await runCmd(OPENCLAW_NODE, clawArgs(["channels", "add", "--help"]));
     const helpText = channelsHelp.output || "";
-
     const supports = (name) => helpText.includes(name);
 
     if (payload.telegramToken?.trim()) {
       if (!supports("telegram")) {
         extra += "\n[telegram] skipped (this openclaw build does not list telegram in `channels add --help`)\n";
       } else {
-        // Avoid `channels add` here (it has proven flaky across builds); write config directly.
         const token = payload.telegramToken.trim();
         const cfgObj = {
           enabled: true,
@@ -1863,13 +3752,14 @@ app.post("/setup/api/run", async (req, res) => {
           groupPolicy: "allowlist",
           streamMode: "partial",
         };
-        const set = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["config", "set", "--json", "channels.telegram", JSON.stringify(cfgObj)]),
-        );
+        const set = await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "--json", "channels.telegram", JSON.stringify(cfgObj)]));
         const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.telegram"]));
-        extra += `\n[telegram config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
-        extra += `\n[telegram verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
+        extra += `
+[telegram config] exit=${set.code} (output ${set.output.length} chars)
+${set.output || "(no output)"}`;
+        extra += `
+[telegram verify] exit=${get.code} (output ${get.output.length} chars)
+${get.output || "(no output)"}`;
       }
     }
 
@@ -1882,17 +3772,16 @@ app.post("/setup/api/run", async (req, res) => {
           enabled: true,
           token,
           groupPolicy: "allowlist",
-          dm: {
-            policy: "pairing",
-          },
+          dm: { policy: "pairing" },
         };
-        const set = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["config", "set", "--json", "channels.discord", JSON.stringify(cfgObj)]),
-        );
+        const set = await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "--json", "channels.discord", JSON.stringify(cfgObj)]));
         const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.discord"]));
-        extra += `\n[discord config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
-        extra += `\n[discord verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
+        extra += `
+[discord config] exit=${set.code} (output ${set.output.length} chars)
+${set.output || "(no output)"}`;
+        extra += `
+[discord verify] exit=${get.code} (output ${get.output.length} chars)
+${get.output || "(no output)"}`;
       }
     }
 
@@ -1905,32 +3794,36 @@ app.post("/setup/api/run", async (req, res) => {
           botToken: payload.slackBotToken?.trim() || undefined,
           appToken: payload.slackAppToken?.trim() || undefined,
         };
-        const set = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["config", "set", "--json", "channels.slack", JSON.stringify(cfgObj)]),
-        );
+        const set = await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "--json", "channels.slack", JSON.stringify(cfgObj)]));
         const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.slack"]));
-        extra += `\n[slack config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
-        extra += `\n[slack verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
+        extra += `
+[slack config] exit=${set.code} (output ${set.output.length} chars)
+${set.output || "(no output)"}`;
+        extra += `
+[slack verify] exit=${get.code} (output ${get.output.length} chars)
+${get.output || "(no output)"}`;
       }
     }
 
-    // Start gateway in the background -- don't block the HTTP response.
-    // Railway's proxy has a ~30s timeout and the full setup chain above
-    // can exceed that if we also wait for the gateway to become ready.
     restartGateway().catch((err) => {
       console.error("[/setup/api/run] background gateway start failed:", err);
     });
     extra += "\n[gateway] starting in background...\n";
-  }
 
-  return res.status(ok ? 200 : 500).json({
-    ok,
-    output: `${onboard.output}${extra}`,
-  });
+    return res.status(200).json({
+      ok: true,
+      output: `${onboard.output}${extra}`,
+    });
   } catch (err) {
     console.error("[/setup/api/run] error:", err);
-    return res.status(500).json({ ok: false, output: `Internal error: ${String(err)}` });
+    return sendSetupError(
+      res,
+      500,
+      "SETUP_INTERNAL_ERROR",
+      "Unexpected internal error while running setup.",
+      "Retry setup once. If it fails again, check server logs and run diagnostics from the Tools tab.",
+      { reason: String(err) },
+    );
   }
 });
 
@@ -1944,7 +3837,7 @@ app.get("/setup/api/debug", async (_req, res) => {
       stateDir: STATE_DIR,
       workspaceDir: WORKSPACE_DIR,
       configPath: configPath(),
-      gatewayTokenFromEnv: Boolean(process.env.OPENCLAW_GATEWAY_TOKEN?.trim() || process.env.CLAWDBOT_GATEWAY_TOKEN?.trim()),
+      gatewayTokenFromEnv: Boolean(process.env.OPENCLAW_GATEWAY_TOKEN?.trim()),
       gatewayTokenPersisted: fs.existsSync(path.join(STATE_DIR, "gateway.token")),
       railwayCommit: process.env.RAILWAY_GIT_COMMIT_SHA || null,
     },
@@ -2105,53 +3998,60 @@ app.post("/setup/api/reset", async (_req, res) => {
 });
 
 app.get("/setup/export", async (_req, res) => {
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
-  res.setHeader("content-type", "application/gzip");
-  res.setHeader(
-    "content-disposition",
-    `attachment; filename="openclaw-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.gz"`,
-  );
+    res.setHeader("content-type", "application/gzip");
+    res.setHeader(
+      "content-disposition",
+      `attachment; filename="openclaw-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.gz"`,
+    );
 
-  // Prefer exporting from a common /data root so archives are easy to inspect and restore.
-  // This preserves dotfiles like /data/.openclaw/openclaw.json.
-  const stateAbs = path.resolve(STATE_DIR);
-  const workspaceAbs = path.resolve(WORKSPACE_DIR);
+    // Prefer exporting from a common /data root so archives are easy to inspect and restore.
+    // This preserves dotfiles like /data/.openclaw/openclaw.json.
+    const stateAbs = path.resolve(STATE_DIR);
+    const workspaceAbs = path.resolve(WORKSPACE_DIR);
 
-  const dataRoot = "/data";
-  const underData = (p) => p === dataRoot || p.startsWith(dataRoot + path.sep);
+    const dataRoot = "/data";
+    const underData = (p) => p === dataRoot || p.startsWith(dataRoot + path.sep);
 
-  let cwd = "/";
-  let paths = [stateAbs, workspaceAbs].map((p) => p.replace(/^\//, ""));
+    let cwd = "/";
+    let paths = [stateAbs, workspaceAbs].map((p) => p.replace(/^\//, ""));
 
-  if (underData(stateAbs) && underData(workspaceAbs)) {
-    cwd = dataRoot;
-    // We export relative to /data so the archive contains: .openclaw/... and workspace/...
-    paths = [
-      path.relative(dataRoot, stateAbs) || ".",
-      path.relative(dataRoot, workspaceAbs) || ".",
-    ];
+    if (underData(stateAbs) && underData(workspaceAbs)) {
+      cwd = dataRoot;
+      // We export relative to /data so the archive contains: .openclaw/... and workspace/...
+      paths = [
+        path.relative(dataRoot, stateAbs) || ".",
+        path.relative(dataRoot, workspaceAbs) || ".",
+      ];
+    }
+
+    const stream = tar.c(
+      {
+        gzip: true,
+        portable: true,
+        noMtime: true,
+        cwd,
+        onwarn: () => {},
+      },
+      paths,
+    );
+
+    stream.on("error", (err) => {
+      console.error("[export]", err);
+      if (!res.headersSent) res.status(500);
+      res.end(String(err));
+    });
+
+    stream.pipe(res);
+  } catch (err) {
+    console.error("[/setup/export] error:", err);
+    if (!res.headersSent) {
+      res.status(500).type("text/plain").send(`Export failed: ${err.message}`);
+    }
   }
-
-  const stream = tar.c(
-    {
-      gzip: true,
-      portable: true,
-      noMtime: true,
-      cwd,
-      onwarn: () => {},
-    },
-    paths,
-  );
-
-  stream.on("error", (err) => {
-    console.error("[export]", err);
-    if (!res.headersSent) res.status(500);
-    res.end(String(err));
-  });
-
-  stream.pipe(res);
 });
 
 function isUnderDir(p, root) {
@@ -2248,6 +4148,7 @@ const proxy = httpProxy.createProxyServer({
   target: GATEWAY_TARGET,
   ws: true,
   xfwd: true,
+  proxyTimeout: 30000, // 30 second timeout
 });
 
 // Inject the gateway token into every proxied request so the gateway
@@ -2258,22 +4159,49 @@ proxy.on("proxyReq", (proxyReq) => {
   }
 });
 
-proxy.on("error", (err, _req, _res) => {
-  console.error("[proxy]", err);
-});
+proxy.on("error", (err, req, res) => {
+  const timestamp = new Date().toISOString();
+  console.error(`[${timestamp}] [proxy] Error proxying ${req.method} ${req.url} to ${GATEWAY_TARGET}:`, err.message);
 
-app.use(async (req, res) => {
-  // If not configured, force users to /setup for any non-setup routes.
-  if (!isConfigured() && !req.path.startsWith("/setup")) {
-    return res.redirect("/setup");
+  // If response is already sent, can't do anything
+  if (res.headersSent) {
+    return res.end();
   }
 
-  if (isConfigured()) {
-    try {
-      await ensureGatewayRunning();
-    } catch (err) {
-      const errMsg = escapeHtml(String(err));
-      return res.status(503).type("html").send(`<!doctype html>
+  // Determine error type and status code
+  let statusCode = 502;
+  let title = "Bad Gateway";
+  let message = "The gateway is not responding. Please try again.";
+
+  if (err.code === "ECONNREFUSED") {
+    statusCode = 503;
+    title = "Service Unavailable";
+    message = "The gateway service is currently unavailable. It may be starting up.";
+  } else if (err.code === "ECONNRESET") {
+    statusCode = 502;
+    title = "Connection Reset";
+    message = "The connection to the gateway was reset. Please try again.";
+  } else if (err.code === "ETIMEDOUT") {
+    statusCode = 504;
+    title = "Gateway Timeout";
+    message = "The gateway took too long to respond. Please try again.";
+  }
+
+  // Return appropriate response
+  if (req.path.startsWith("/setup/api/") || req.headers.accept?.includes("application/json")) {
+    return res.status(statusCode).json({
+      ok: false,
+      error: message,
+      code: err.code,
+    });
+  }
+
+  res.status(statusCode).type("html").send(errorPageHTML(statusCode, title, message, err.code));
+});
+
+function sendGatewayStartingPage(res, message = "Gateway is starting up") {
+  const errMsg = escapeHtml(String(message || ""));
+  res.status(503).type("html").send(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Gateway Starting - OpenClaw</title>
 <style>
@@ -2299,19 +4227,73 @@ h1{font-size:1rem;font-weight:600;margin-bottom:0.375rem;animation:fadeUp 0.4s e
 <div class="spinner" role="status" aria-label="Loading"></div>
 <h1>Gateway is starting up</h1>
 <p class="desc">The OpenClaw gateway is taking longer than expected. This can happen on cold starts.</p>
-<div class="err">${errMsg}</div>
+${errMsg ? `<div class="err">${errMsg}</div>` : ""}
 <div class="actions">
 <button class="btn btn-primary" onclick="location.reload()">Retry</button>
 <a href="/setup" class="btn btn-secondary">Go to Setup</a>
 </div>
-<p class="auto">This page will auto-retry in <span id="cd">10</span>s</p>
+<p class="auto">This page will auto-retry in <span id="cd">5</span>s</p>
 </div>
-<script>let t=10;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
+<script>let t=5;const el=document.getElementById("cd");setInterval(()=>{t--;if(t<=0)location.reload();else el.textContent=t},1000);</script>
 </body></html>`);
+}
+
+
+app.use(async (req, res) => {
+  // If not configured, force users to /setup for any non-setup routes.
+  if (!isConfigured() && !req.path.startsWith("/setup")) {
+    return res.redirect("/setup");
+  }
+
+  if (isConfigured()) {
+    // If the gateway is already starting in the background, don't block this
+    // request for up to 45s. Instead show the "starting" page immediately.
+    if (gatewayStarting && !gatewayReady) {
+      return sendGatewayStartingPage(res, "Gateway is starting up in the background\u2026");
+    }
+
+    try {
+      await ensureGatewayRunning();
+    } catch (err) {
+      return sendGatewayStartingPage(res, String(err));
     }
   }
 
   return proxy.web(req, res, { target: GATEWAY_TARGET });
+});
+
+// ---------- Global Error Handler ----------
+
+app.use((err, req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.error(`[${timestamp}] Error on ${req.method} ${req.url}:`, err);
+  console.error(err.stack);
+
+  // Determine if this is an API route
+  const isApiRoute = req.path.startsWith("/setup/api/");
+
+  // Determine status code
+  let statusCode = err.statusCode || err.status || 500;
+  if (statusCode < 400) statusCode = 500;
+
+  // For API routes, return JSON
+  if (isApiRoute || req.headers.accept?.includes("application/json")) {
+    return res.status(statusCode).json({
+      ok: false,
+      error: err.message || "Internal server error",
+      ...(process.env.NODE_ENV !== "production" && { stack: err.stack }),
+    });
+  }
+
+  // For browser routes, return styled HTML error page
+  const title = statusCode < 500 ? "Request Error" : "Server Error";
+  const message = statusCode < 500
+    ? err.message || "The request could not be completed."
+    : "An unexpected error occurred. Please try again later.";
+
+  res.status(statusCode).type("html").send(
+    errorPageHTML(statusCode, title, message, process.env.NODE_ENV !== "production" ? err.stack : null)
+  );
 });
 
 const server = app.listen(PORT, "0.0.0.0", () => {
@@ -2321,19 +4303,14 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[wrapper] gateway token: ${OPENCLAW_GATEWAY_TOKEN ? "(set)" : "(missing)"}`);
   console.log(`[wrapper] gateway target: ${GATEWAY_TARGET}`);
   if (isAuthConfigured()) {
-    console.log(`[wrapper] auth: GitHub OAuth (client_id=${GITHUB_CLIENT_ID.slice(0, 8)}...)`);
-    if (isOwnerLockEnabled()) {
-      console.log(`[wrapper] owner-only access: @${OWNER_GITHUB_USER}`);
-    } else if (EFFECTIVE_ALLOWED_USERS.length > 0) {
-      console.log(`[wrapper] allowed users: ${EFFECTIVE_ALLOWED_USERS.join(", ")}`);
-    } else {
-      console.log(`[wrapper] allowed users: (any GitHub user)`);
-    }
+    console.log(`[wrapper] auth: Username/Password (username=${AUTH_USERNAME})`);
+    console.log(`[wrapper] auth: Password is configured`);
   } else {
     console.log(`[wrapper] ================================================`);
-    console.log(`[wrapper] WARNING: GitHub OAuth not configured!`);
-    console.log(`[wrapper] Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET`);
-    console.log(`[wrapper] in your Railway variables to protect this instance.`);
+    console.log(`[wrapper] WARNING: Authentication not configured!`);
+    console.log(`[wrapper] Set AUTH_PASSWORD (and optionally AUTH_USERNAME)`);
+    console.log(`[wrapper] in your environment variables to protect this instance.`);
+    console.log(`[wrapper] Open Access mode: Anyone can access /setup`);
     console.log(`[wrapper] ================================================`);
   }
   // Don't start gateway unless configured; proxy will ensure it starts.
@@ -2374,12 +4351,95 @@ server.on("upgrade", async (req, socket, head) => {
   proxy.ws(req, socket, head, { target: GATEWAY_TARGET });
 });
 
-process.on("SIGTERM", () => {
-  // Best-effort shutdown
+// ---------- Process-Level Error Handling and Graceful Shutdown ----------
+
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`\n[wrapper] Received ${signal}, starting graceful shutdown...`);
+
+  // Set a timeout to force exit after 10 seconds
+  const forceExitTimer = setTimeout(() => {
+    console.error("[wrapper] Graceful shutdown timeout - forcing exit");
+    process.exit(1);
+  }, 10000);
+
   try {
-    if (gatewayProc) gatewayProc.kill("SIGTERM");
-  } catch {
-    // ignore
+    // Close HTTP server (stop accepting new connections)
+    await new Promise((resolve) => {
+      server.close((err) => {
+        if (err) console.error("[wrapper] Error closing server:", err);
+        else console.log("[wrapper] HTTP server closed");
+        resolve();
+      });
+    });
+
+    // Kill gateway process
+    if (gatewayProc) {
+      console.log("[wrapper] Terminating gateway process...");
+      gatewayProc.kill("SIGTERM");
+      
+      // Wait up to 3 seconds for graceful termination
+      await new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          if (gatewayProc && !gatewayProc.killed) {
+            console.log("[wrapper] Gateway didn't exit gracefully, sending SIGKILL");
+            gatewayProc.kill("SIGKILL");
+          }
+          resolve();
+        }, 3000);
+
+        if (gatewayProc) {
+          gatewayProc.once("exit", () => {
+            clearTimeout(timeout);
+            console.log("[wrapper] Gateway process terminated");
+            resolve();
+          });
+        } else {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    }
+
+    clearTimeout(forceExitTimer);
+    console.log("[wrapper] Graceful shutdown complete");
+    process.exit(0);
+  } catch (err) {
+    console.error("[wrapper] Error during shutdown:", err);
+    clearTimeout(forceExitTimer);
+    process.exit(1);
   }
-  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+process.on("uncaughtException", (err) => {
+  console.error("[wrapper] FATAL: Uncaught exception - application in undefined state");
+  console.error(err);
+  console.error(err.stack);
+  
+  // Attempt minimal cleanup but exit immediately regardless
+  // The application is in an undefined state and cannot continue safely
+  try {
+    if (gatewayProc && !gatewayProc.killed) {
+      gatewayProc.kill("SIGKILL"); // Force kill immediately
+    }
+  } catch (cleanupErr) {
+    console.error("[wrapper] Error during emergency cleanup:", cleanupErr);
+  }
+  
+  // Exit immediately - do not attempt graceful shutdown
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[wrapper] Unhandled rejection at:", promise);
+  console.error("[wrapper] Reason:", reason);
+  // Don't exit on unhandled rejection, just log it
+  // In production, you might want to exit gracefully here
 });
