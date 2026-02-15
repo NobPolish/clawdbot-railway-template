@@ -2966,6 +2966,7 @@ app.get("/setup", (req, res) => {
     .btn-danger:hover:not(:disabled) { background: rgba(239,68,68,0.15); }
     .btn-ghost { background: transparent; color: var(--text-dim); border-color: transparent; }
     .btn-ghost:hover:not(:disabled) { color: var(--text-muted); background: var(--surface); }
+    .btn-mini { padding: 0.25rem 0.5rem; font-size: 0.6875rem; border-radius: 999px; }
     .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 
     /* Button spinner */
@@ -3090,6 +3091,13 @@ app.get("/setup", (req, res) => {
       .topbar-sep { display: none; }
       #toastContainer { left: 1rem; right: 1rem; bottom: 1rem; }
       .toast { max-width: 100%; }
+      .checklist-item { grid-template-columns: auto 1fr; }
+      .checklist-item .status-pill { grid-column: 1 / -1; justify-self: flex-start; }
+      .env-row { grid-template-columns: 1fr; align-items: start; }
+      .env-row .status-pill { justify-self: flex-start; }
+      .env-help-item { grid-template-columns: 1fr; align-items: start; }
+      .simple-list li { grid-template-columns: auto 1fr; }
+      .simple-list li .status-pill { grid-column: 1 / -1; justify-self: flex-start; }
     }
   </style>
 </head>
@@ -3147,6 +3155,177 @@ app.get("/setup", (req, res) => {
       <div class="card animate-in">
         <div class="card-header">
           <div class="card-title">
+            <svg class="card-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg>
+            Quickstart Checklist
+          </div>
+          <div class="card-desc">Finish setup without touching Railway variables.</div>
+        </div>
+        <div class="checklist">
+          <div class="checklist-item">
+            <span class="checklist-step">1</span>
+            <div>
+              <div class="checklist-title">Verify environment</div>
+              <div class="checklist-desc">We store state in a Railway volume and generate secure tokens for you.</div>
+            </div>
+            <span class="status-pill" id="envStatusPill">Checking...</span>
+          </div>
+          <div class="checklist-item">
+            <span class="checklist-step">2</span>
+            <div>
+              <div class="checklist-title">Choose a provider</div>
+              <div class="checklist-desc">Paste a single API key and (optional) model.</div>
+            </div>
+            <span class="status-pill ok">Ready</span>
+          </div>
+          <div class="checklist-item">
+            <span class="checklist-step">3</span>
+            <div>
+              <div class="checklist-title">Apply & launch</div>
+              <div class="checklist-desc">We configure OpenClaw and start the gateway automatically.</div>
+            </div>
+            <span class="status-pill ok">One click</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card animate-in animate-in-delay-1">
+        <div class="card-header">
+          <div class="card-title">
+            <svg class="card-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
+            Environment & Security
+          </div>
+          <div class="card-desc">Quick visibility into storage, tokens, and access protection.</div>
+        </div>
+        <div class="env-list">
+          <div class="env-row">
+            <span class="env-label">State storage</span>
+            <span class="env-value" id="envStateDir">—</span>
+            <span class="status-pill" id="envStateStatus">Checking...</span>
+          </div>
+          <div class="env-row">
+            <span class="env-label">Workspace</span>
+            <span class="env-value" id="envWorkspaceDir">—</span>
+            <span class="status-pill" id="envWorkspaceStatus">Checking...</span>
+          </div>
+          <div class="env-row">
+            <span class="env-label">Gateway token</span>
+            <span class="env-value" id="envGatewayToken">—</span>
+            <span class="status-pill" id="envGatewayStatus">Checking...</span>
+          </div>
+          <div class="env-row">
+            <span class="env-label">Setup password</span>
+            <span class="env-value" id="envSetupPassword">—</span>
+            <span class="status-pill" id="envPasswordStatus">Checking...</span>
+          </div>
+        </div>
+        <div class="env-help" id="envHelp" hidden>
+          <div class="env-help-title">Quick fixes (optional)</div>
+          <div class="env-help-item" id="envHelpVolume">
+            <span>Mount a Railway volume at <code>/data</code> and set <code>OPENCLAW_STATE_DIR=/data/.openclaw</code> plus <code>OPENCLAW_WORKSPACE_DIR=/data/workspace</code>.</span>
+            <button class="btn btn-ghost btn-mini" data-copy="OPENCLAW_STATE_DIR=/data/.openclaw&#10;OPENCLAW_WORKSPACE_DIR=/data/workspace">Copy vars</button>
+          </div>
+          <div class="env-help-item" id="envHelpGateway">
+            <span>Set a stable <code>OPENCLAW_GATEWAY_TOKEN</code> so the UI stays protected across restarts.</span>
+            <button class="btn btn-ghost btn-mini" data-copy="OPENCLAW_GATEWAY_TOKEN=">Copy key</button>
+          </div>
+          <div class="env-help-item" id="envHelpPassword">
+            <span>Create a setup password to lock access to <code>/setup</code>.</span>
+            <button class="btn btn-ghost btn-mini" data-copy="/setup/create-password">Copy link</button>
+          </div>
+          <div class="env-help-item" id="envHelpGithub">
+            <span>Enable GitHub OAuth by setting <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code>.</span>
+            <button class="btn btn-ghost btn-mini" data-copy="GITHUB_CLIENT_ID=&#10;GITHUB_CLIENT_SECRET=">Copy keys</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card animate-in animate-in-delay-4">
+        <div class="card-header">
+          <div class="card-title">
+            <svg class="card-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 9.5-8 10-4.5-.5-8-5-8-10V6l8-4z"/></svg>
+            Security Checklist
+          </div>
+          <div class="card-desc">Verify critical access controls before exposing the UI.</div>
+        </div>
+        <ul class="simple-list" id="securityChecklist">
+          <li>
+            <span>Setup password configured</span>
+            <span class="status-pill" id="securityPasswordStatus">Checking...</span>
+          </li>
+          <li>
+            <span>Gateway token persisted</span>
+            <span class="status-pill" id="securityGatewayStatus">Checking...</span>
+          </li>
+          <li>
+            <span>GitHub OAuth enabled</span>
+            <span class="status-pill" id="securityGithubStatus">Checking...</span>
+          </li>
+          <li>
+            <span>Railway volume mounted</span>
+            <span class="status-pill" id="securityVolumeStatus">Checking...</span>
+          </li>
+        </ul>
+      </div>
+
+      <div class="card animate-in animate-in-delay-3">
+        <div class="card-header">
+          <div class="card-title">
+            <svg class="card-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v6H4z"/><path d="M4 14h16v6H4z"/><path d="M8 8h.01"/><path d="M8 18h.01"/></svg>
+            Power-user shortcuts
+          </div>
+          <div class="card-desc">Quick copies for common actions and diagnostics.</div>
+        </div>
+        <div class="info-grid">
+          <div class="info-card">
+            <div class="info-title">CLI diagnostics</div>
+            <div class="info-desc">Copy and run in Railway shell or container.</div>
+            <div class="info-row">
+              <code>openclaw status</code>
+              <button class="btn btn-ghost btn-mini" data-copy="openclaw status">Copy</button>
+            </div>
+            <div class="info-row">
+              <code>openclaw health</code>
+              <button class="btn btn-ghost btn-mini" data-copy="openclaw health">Copy</button>
+            </div>
+            <div class="info-row">
+              <code>openclaw logs --tail 200</code>
+              <button class="btn btn-ghost btn-mini" data-copy="openclaw logs --tail 200">Copy</button>
+            </div>
+          </div>
+          <div class="info-card">
+            <div class="info-title">Gateway access</div>
+            <div class="info-desc">Use the internal gateway for local debugging.</div>
+            <div class="info-row">
+              <code>http://127.0.0.1:${INTERNAL_GATEWAY_PORT}</code>
+              <button class="btn btn-ghost btn-mini" data-copy="http://127.0.0.1:${INTERNAL_GATEWAY_PORT}">Copy</button>
+            </div>
+            <div class="info-row">
+              <code>Authorization: Bearer &lt;token&gt;</code>
+              <button class="btn btn-ghost btn-mini" data-copy="Authorization: Bearer ">Copy</button>
+            </div>
+          </div>
+          <div class="info-card">
+            <div class="info-title">Railway vars</div>
+            <div class="info-desc">Copy the full starter set for Railway.</div>
+            <div class="info-row">
+              <code>OPENCLAW_STATE_DIR=/data/.openclaw</code>
+              <button class="btn btn-ghost btn-mini" data-copy="OPENCLAW_STATE_DIR=/data/.openclaw">Copy</button>
+            </div>
+            <div class="info-row">
+              <code>OPENCLAW_WORKSPACE_DIR=/data/workspace</code>
+              <button class="btn btn-ghost btn-mini" data-copy="OPENCLAW_WORKSPACE_DIR=/data/workspace">Copy</button>
+            </div>
+            <div class="info-row">
+              <code>OPENCLAW_GATEWAY_TOKEN=</code>
+              <button class="btn btn-ghost btn-mini" data-copy="OPENCLAW_GATEWAY_TOKEN=">Copy</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card animate-in animate-in-delay-2">
+        <div class="card-header">
+          <div class="card-title">
             <svg class="card-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
             AI Provider
           </div>
@@ -3202,7 +3381,7 @@ app.get("/setup", (req, res) => {
       <div class="actions animate-in animate-in-delay-1" style="margin-bottom:0.875rem;">
         <button class="btn btn-primary" id="run">
           <span class="spinner"></span>
-          <span class="btn-label">Deploy Configuration</span>
+          <span class="btn-label">Apply & Launch</span>
         </button>
         <button class="btn btn-secondary" id="preflightRun">Run Preflight</button>
         <button class="btn btn-ghost" id="reset">Reset</button>
