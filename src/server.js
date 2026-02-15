@@ -719,6 +719,9 @@ function isAuthConfigured() {
 // ---------- Password authentication ----------
 
 function requireSetupPassword(req, res, next) {
+  if (isOwnerLockEnabled()) {
+    return next();
+  }
   // Exclude public routes - paths are relative when middleware is mounted on /setup
   if (
     req.path === "/create-password" ||
@@ -949,6 +952,12 @@ function loginPageHTML(error) {
   const errorBlock = error
     ? `<div class="alert alert-error">${escapeHtml(error)}</div>`
     : "";
+  const ownerBlock = isOwnerLockEnabled()
+    ? `<div class="alert alert-owner">
+        Owner-only mode is enabled for <strong>@${escapeHtml(OWNER_GITHUB_USER)}</strong>.
+        Only that GitHub account can sign in.
+      </div>`
+    : "";
   const notConfigured = !isAuthConfigured()
     ? `<div class="alert alert-warn">
         <strong>Open Access Mode</strong><br/>
@@ -1013,6 +1022,7 @@ function loginPageHTML(error) {
     }
     .alert-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(127,29,29,0.5); color: #fca5a5; }
     .alert-warn { background: rgba(234,179,8,0.06); border: 1px solid rgba(133,77,14,0.5); color: #fde68a; }
+    .alert-owner { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.3); color: #bfdbfe; }
     .alert code {
       background: #1c1c21; padding: 0.1rem 0.3rem; border-radius: 3px;
       font-size: 0.75rem; color: #d4d4d8;
@@ -1071,6 +1081,7 @@ function loginPageHTML(error) {
     <h1>Welcome to OpenClaw</h1>
     <p class="subtitle">Sign in to manage your instance</p>
     ${errorBlock}
+    ${ownerBlock}
     ${notConfigured}
     <form method="POST" action="/auth/login">
       <div class="form-group">
