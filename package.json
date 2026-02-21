@@ -10,7 +10,7 @@
     "start": "node src/server.js",
     "lint": "node -c src/server.js",
     "smoke": "node scripts/smoke.js",
-    "test:frontend-request": "node --test tests/setup-request-client.test.js tests/setup-error-boundary.integration.test.js tests/setup-draft-store.integration.test.js"
+    "test:frontend-request": "node --test tests/setup-request-client.test.js tests/setup-error-boundary.integration.test.js"
   },
   "dependencies": {
     "express": "^5.1.0",

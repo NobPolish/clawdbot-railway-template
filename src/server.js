@@ -1718,11 +1718,6 @@ app.get("/setup/error-boundary.js", (_req, res) => {
   res.send(fs.readFileSync(path.join(process.cwd(), "src", "setup-error-boundary.js"), "utf8"));
 });
 
-app.get("/setup/draft-store.js", (_req, res) => {
-  res.type("application/javascript");
-  res.send(fs.readFileSync(path.join(process.cwd(), "src", "setup-draft-store.js"), "utf8"));
-});
-
 app.get("/setup/app.js", (_req, res) => {
   // Serve JS for /setup (kept external to avoid inline encoding/template issues)
   res.type("application/javascript");

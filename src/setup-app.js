@@ -1,6 +1,5 @@
-import { createSetupRequestClient } from "/setup/request-client.js";
+import { createSetupRequestClient, SetupRequestError } from "/setup/request-client.js";
 import { createErrorBannerController } from "/setup/error-boundary.js";
-import { DRAFT_FIELDS, DRAFT_TTL_MS, clearDraft, createDraft, loadDraft, mergeDraftState, pickDraftState, saveDraft } from "/setup/draft-store.js";
 
 // OpenClaw Setup - Client-side logic
 // Served at /setup/app.js
@@ -144,9 +143,6 @@ import { DRAFT_FIELDS, DRAFT_TTL_MS, clearDraft, createDraft, loadDraft, mergeDr
 
   var pageRoot = document.querySelector('main') || document.body;
   var errorBoundary = createErrorBannerController({ root: pageRoot });
-
-  var draftBannerEl = null;
-  var draftSaveTimer = null;
 
   // ======== Model field visibility ========
   var providersWithModel = {
@@ -760,13 +756,6 @@ import { DRAFT_FIELDS, DRAFT_TTL_MS, clearDraft, createDraft, loadDraft, mergeDr
   // ======== Init ========
   [runBtn, document.getElementById('reset'), configSaveEl, importRunEl, pairingBtn].forEach(function (el) {
     if (el) el.setAttribute('data-safe-mode-lock', 'true');
-  });
-
-  DRAFT_FIELDS.forEach(function (field) {
-    var el = document.getElementById(field);
-    if (!el) return;
-    el.addEventListener('input', scheduleDraftSave);
-    el.addEventListener('change', scheduleDraftSave);
   });
 
   initPreviewMode();
