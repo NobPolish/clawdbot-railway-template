@@ -48,12 +48,26 @@ function mergeSignals(timeoutSignal, externalSignal) {
   if (externalSignal.aborted) {
     throw makeAbortError("Request canceled");
   }
+
   const merged = new AbortController();
-  const onTimeoutAbort = () => merged.abort(timeoutSignal.reason || makeAbortError("Request timeout"));
-  const onExternalAbort = () => merged.abort(externalSignal.reason || makeAbortError("Request canceled"));
+
+  const onTimeoutAbort = () => {
+    merged.abort(timeoutSignal.reason || makeAbortError("Request timeout"));
+  };
+
+  const onExternalAbort = () => {
+    merged.abort(externalSignal.reason || makeAbortError("Request canceled"));
+  };
+
+  const cleanup = () => {
+    timeoutSignal.removeEventListener("abort", onTimeoutAbort);
+    externalSignal.removeEventListener("abort", onExternalAbort);
+    merged.signal.removeEventListener("abort", cleanup);
+  };
 
   timeoutSignal.addEventListener("abort", onTimeoutAbort, { once: true });
   externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  merged.signal.addEventListener("abort", cleanup, { once: true });
 
   return merged.signal;
 }
