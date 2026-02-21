@@ -88,8 +88,10 @@ The `SETUP_PASSWORD` is **required** to access the `/setup` configuration panel.
 **Optional Variables:**
 - `SETUP_PASSWORD` — Leave empty for auto-generation (recommended), or set a strong password (16+ characters)
 - `OPENCLAW_GATEWAY_TOKEN` — if not set, the wrapper generates one (not ideal). In a template, set it using a generated secret.
+- `OPENCLAW_STATE_DIR_STRICT=true` — fail fast if `OPENCLAW_STATE_DIR` is not writable (recommended for production hardening).
 
 Notes:
+- If `OPENCLAW_STATE_DIR` is set but not writable, startup now falls back to `/data/.openclaw`, then `$HOME/.openclaw`, then a temporary directory and logs each fallback.
 - This template pins OpenClaw to a known-good version by default via Docker build arg `OPENCLAW_GIT_REF`.
 
 4) Enable **Public Networking** (HTTP). Railway will assign a domain.
