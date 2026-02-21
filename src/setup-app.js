@@ -237,6 +237,157 @@ import { createErrorBannerController } from "/setup/error-boundary.js";
     btn.disabled = loading;
   }
 
+  function collectDraftState() {
+    return pickDraftState({
+      flow: document.getElementById('flow') ? document.getElementById('flow').value : '',
+      authChoice: authChoiceEl ? authChoiceEl.value : '',
+      authSecret: document.getElementById('authSecret') ? document.getElementById('authSecret').value : '',
+      model: modelEl ? modelEl.value : '',
+      telegramToken: document.getElementById('telegramToken') ? document.getElementById('telegramToken').value : '',
+      discordToken: document.getElementById('discordToken') ? document.getElementById('discordToken').value : '',
+      slackBotToken: document.getElementById('slackBotToken') ? document.getElementById('slackBotToken').value : '',
+      slackAppToken: document.getElementById('slackAppToken') ? document.getElementById('slackAppToken').value : '',
+      configText: configTextEl ? configTextEl.value : ''
+    });
+  }
+
+  function applyDraftState(state) {
+    if (document.getElementById('flow')) document.getElementById('flow').value = state.flow || '';
+    if (authChoiceEl) authChoiceEl.value = state.authChoice || authChoiceEl.value;
+    if (document.getElementById('authSecret')) document.getElementById('authSecret').value = state.authSecret || '';
+    if (modelEl) modelEl.value = state.model || '';
+    if (document.getElementById('telegramToken')) document.getElementById('telegramToken').value = state.telegramToken || '';
+    if (document.getElementById('discordToken')) document.getElementById('discordToken').value = state.discordToken || '';
+    if (document.getElementById('slackBotToken')) document.getElementById('slackBotToken').value = state.slackBotToken || '';
+    if (document.getElementById('slackAppToken')) document.getElementById('slackAppToken').value = state.slackAppToken || '';
+    if (configTextEl) configTextEl.value = state.configText || configTextEl.value;
+    updateModelVisibility();
+    updateChannelBadges();
+  }
+
+  function hideDraftBanner() {
+    if (draftBannerEl) draftBannerEl.remove();
+    draftBannerEl = null;
+  }
+
+  function showDraftBanner(message, actions) {
+    hideDraftBanner();
+    draftBannerEl = document.createElement('div');
+    draftBannerEl.style.margin = '0 0 1rem 0';
+    draftBannerEl.style.padding = '0.85rem 1rem';
+    draftBannerEl.style.borderRadius = '10px';
+    draftBannerEl.style.border = '1px solid rgba(59,130,246,.45)';
+    draftBannerEl.style.background = 'rgba(59,130,246,.12)';
+    draftBannerEl.style.color = '#bfdbfe';
+    draftBannerEl.style.display = 'flex';
+    draftBannerEl.style.justifyContent = 'space-between';
+    draftBannerEl.style.alignItems = 'center';
+    draftBannerEl.style.gap = '0.75rem';
+
+    var text = document.createElement('span');
+    text.textContent = message;
+
+    var controls = document.createElement('div');
+    controls.style.display = 'flex';
+    controls.style.gap = '0.5rem';
+
+    actions.forEach(function (action) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = action.label;
+      btn.style.border = '1px solid rgba(255,255,255,.25)';
+      btn.style.background = 'rgba(255,255,255,.08)';
+      btn.style.color = '#fff';
+      btn.style.borderRadius = '8px';
+      btn.style.padding = '0.35rem 0.65rem';
+      btn.style.cursor = 'pointer';
+      btn.addEventListener('click', action.onClick);
+      controls.appendChild(btn);
+    });
+
+    draftBannerEl.appendChild(text);
+    draftBannerEl.appendChild(controls);
+    pageRoot.prepend(draftBannerEl);
+  }
+
+  function persistDraftNow() {
+    try {
+      var draft = createDraft(collectDraftState());
+      saveDraft(window.localStorage, draft);
+    } catch (_e) {
+      // best-effort only
+    }
+  }
+
+  function scheduleDraftSave() {
+    clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(persistDraftNow, 200);
+  }
+
+  function initDraftResume() {
+    var loaded = loadDraft(window.localStorage, { ttlMs: DRAFT_TTL_MS });
+
+    if (loaded.reason === 'stale') {
+      clearDraft(window.localStorage);
+      return;
+    }
+
+    if (!loaded.draft || loaded.reason !== 'ok') return;
+
+    var current = collectDraftState();
+    var merged = mergeDraftState(current, loaded.draft.state, { allowConflict: false });
+    var ageMinutes = Math.max(1, Math.round((Date.now() - Number(loaded.draft.updatedAt || loaded.draft.createdAt || Date.now())) / 60000));
+
+    if (merged.conflicts.length > 0) {
+      showDraftBanner('Unsaved draft found (' + ageMinutes + ' min ago). Some fields already have values.', [
+        {
+          label: 'Restore safe fields',
+          onClick: function () {
+            applyDraftState(merged.state);
+            hideDraftBanner();
+            toast('Draft partially restored', 'info');
+          }
+        },
+        {
+          label: 'Force restore all',
+          onClick: function () {
+            applyDraftState(mergeDraftState(current, loaded.draft.state, { allowConflict: true }).state);
+            hideDraftBanner();
+            toast('Draft restored', 'success');
+          }
+        },
+        {
+          label: 'Discard draft',
+          onClick: function () {
+            clearDraft(window.localStorage);
+            hideDraftBanner();
+            toast('Draft discarded', 'info');
+          }
+        }
+      ]);
+      return;
+    }
+
+    showDraftBanner('Unsaved draft found (' + ageMinutes + ' min ago).', [
+      {
+        label: 'Resume',
+        onClick: function () {
+          applyDraftState(loaded.draft.state);
+          hideDraftBanner();
+          toast('Draft restored', 'success');
+        }
+      },
+      {
+        label: 'Discard',
+        onClick: function () {
+          clearDraft(window.localStorage);
+          hideDraftBanner();
+          toast('Draft discarded', 'info');
+        }
+      }
+    ]);
+  }
+
 
   function initPreviewMode() {
     var devAllowed = Boolean(window.__OPENCLAW_DEV_FEATURES_ALLOWED__);
@@ -393,6 +544,8 @@ import { createErrorBannerController } from "/setup/error-boundary.js";
       try { j = JSON.parse(text); } catch (_e) { j = { ok: false, output: text }; }
       appendLog(j.output || JSON.stringify(j, null, 2));
       if (j.ok) {
+        clearDraft(window.localStorage);
+        hideDraftBanner();
         toast('Configuration deployed successfully', 'success');
       } else {
         toast('Setup completed with warnings -- check the log', 'info');
@@ -606,5 +759,6 @@ import { createErrorBannerController } from "/setup/error-boundary.js";
   });
 
   initPreviewMode();
+  initDraftResume();
   refreshStatus();
 })();
