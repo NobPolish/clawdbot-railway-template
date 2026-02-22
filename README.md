@@ -16,6 +16,44 @@ A modern, production-ready full-stack application combining a Node.js/OpenClaw b
 
 ---
 
+## 🏁 Final Draft: Unified Product Vision
+
+This final pass aligns the platform around five equally important capabilities so the product feels cohesive rather than stitched together:
+
+1. **Design Excellence (UX first)**
+   - Keep flows intuitive, fast, and mobile-ready.
+   - Prioritize clarity in onboarding, dashboard navigation, and account settings.
+
+2. **Adaptive Intelligence (Recommendations)**
+   - Build recommendation and guidance logic from user behavior signals.
+   - Personalize onboarding hints, dashboard actions, and next-best steps.
+
+3. **Community Intelligence (Collaboration)**
+   - Enable user-to-user knowledge sharing patterns (forums, shared insights, reusable playbooks).
+   - Treat collective contributions as a first-class product surface, not an afterthought.
+
+4. **Security by Default (Platform trust)**
+   - Enforce strong auth boundaries, transport safety, and role-aware access controls.
+   - Keep observability and incident readiness integrated into normal delivery flow.
+
+5. **Insight-Driven Decisions (Analytics)**
+   - Surface product and user metrics through actionable dashboards.
+   - Optimize for decision velocity: highlight trends, anomalies, and conversion blockers.
+
+### Integration Principle
+
+When features overlap, prefer **one canonical implementation** with extension points over duplicate systems. This keeps maintenance low while preserving each capability's unique value.
+
+### Final-Round Execution Checklist
+
+- Validate UX consistency across auth, onboarding, and dashboard.
+- Verify recommendation hooks can consume behavior signals safely.
+- Confirm collaboration modules integrate with existing auth/permissions.
+- Run security checks on token handling, route protection, and environment config.
+- Ensure analytics events are mapped to user journeys and business outcomes.
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -304,5 +342,4 @@ What you get:
 - One-click export/import backups
 
 For OpenClaw setup details, see the original documentation in this file or [OpenClaw Docs](https://docs.openclaw.ai).
-
 
