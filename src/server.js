@@ -626,6 +626,203 @@ const SESSION_CONFIG = {
   },
 };
 
+// ---------- Chimera Protocol: Shared Design System ----------
+
+function chimeraBaseCSS() {
+  return `
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --ch-bg: #060609;
+      --ch-surface: #0c0c10;
+      --ch-surface-2: #14141a;
+      --ch-surface-glass: rgba(12,12,16,0.65);
+      --ch-border: #1e1e28;
+      --ch-border-glow: rgba(99,102,241,0.15);
+      --ch-border-active: rgba(99,102,241,0.35);
+      --ch-text: #f0f0f5;
+      --ch-text-muted: #8888a0;
+      --ch-text-dim: #55556a;
+      --ch-accent: #6366f1;
+      --ch-accent-hover: #818cf8;
+      --ch-cyan: #22d3ee;
+      --ch-purple: #a78bfa;
+      --ch-success: #34d399;
+      --ch-warning: #fbbf24;
+      --ch-danger: #f87171;
+      --ch-radius: 12px;
+      --ch-radius-sm: 8px;
+      --ch-font: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      --ch-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+      --ch-ease: cubic-bezier(0.4, 0, 0.2, 1);
+      --ch-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    body {
+      font-family: var(--ch-font); background: var(--ch-bg); color: var(--ch-text);
+      min-height: 100vh; line-height: 1.6; -webkit-font-smoothing: antialiased;
+      display: flex; align-items: center; justify-content: center; padding: 1.5rem;
+      position: relative; overflow-x: hidden;
+    }
+    body::before {
+      content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.02;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 256px 256px;
+    }
+    body::after {
+      content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 10%, rgba(99,102,241,0.06) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 20%, rgba(167,139,250,0.04) 0%, transparent 50%),
+        radial-gradient(ellipse 70% 40% at 50% 90%, rgba(34,211,238,0.03) 0%, transparent 50%);
+    }
+    body > * { position: relative; z-index: 1; }
+    ::selection { background: rgba(99,102,241,0.3); color: var(--ch-text); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--ch-border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--ch-text-dim); }
+
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes scaleIn { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
+    @keyframes pulseGlow { 0%,100% { box-shadow: 0 0 8px rgba(99,102,241,0.2); } 50% { box-shadow: 0 0 20px rgba(99,102,241,0.4); } }
+    @keyframes breathe { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .ch-card {
+      background: var(--ch-surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--ch-border); border-radius: var(--ch-radius);
+      padding: 2.5rem 2rem; max-width: 440px; width: 100%;
+      animation: scaleIn 0.45s var(--ch-spring) both;
+    }
+    .ch-logo {
+      width: 48px; height: 48px; border-radius: 14px;
+      background: var(--ch-surface-2); border: 1px solid var(--ch-border-glow);
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 1.5rem;
+      animation: scaleIn 0.5s var(--ch-spring) both, pulseGlow 3s ease-in-out infinite;
+    }
+    .ch-logo svg { width: 24px; height: 24px; color: var(--ch-accent); }
+    h1 {
+      font-size: 1.25rem; font-weight: 600; text-align: center;
+      letter-spacing: -0.02em; line-height: 1.3;
+      animation: fadeUp 0.45s var(--ch-ease) 0.1s both;
+    }
+    .subtitle {
+      color: var(--ch-text-muted); font-size: 0.8125rem; text-align: center;
+      margin-top: 0.375rem; margin-bottom: 2rem;
+      animation: fadeUp 0.45s var(--ch-ease) 0.15s both;
+    }
+    .alert {
+      padding: 0.75rem 1rem; border-radius: var(--ch-radius-sm); font-size: 0.8125rem;
+      margin-bottom: 1.25rem; line-height: 1.5;
+      animation: fadeUp 0.4s var(--ch-ease) 0.2s both;
+    }
+    .alert-error { background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.2); color: #fca5a5; }
+    .alert-success { background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.2); color: #6ee7b7; }
+    .alert-warn { background: rgba(251,191,36,0.06); border: 1px solid rgba(251,191,36,0.2); color: #fde68a; }
+    .alert-info { background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2); color: #a5b4fc; }
+    .alert-owner { background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2); color: #c7d2fe; }
+    .alert code {
+      background: rgba(255,255,255,0.05); padding: 0.1rem 0.3rem; border-radius: 3px;
+      font-size: 0.75rem; color: #d4d4d8; font-family: var(--ch-font-mono);
+    }
+    .form-group { margin-bottom: 1rem; animation: fadeUp 0.45s var(--ch-ease) 0.2s both; }
+    .form-group label, .field-label {
+      display: block; font-size: 0.8125rem; font-weight: 500;
+      margin-bottom: 0.375rem; color: var(--ch-text-muted);
+    }
+    .form-group input, .ch-input {
+      width: 100%; padding: 0.625rem 0.875rem; border-radius: var(--ch-radius-sm);
+      border: 1px solid var(--ch-border); background: var(--ch-surface-2);
+      color: var(--ch-text); font-size: 0.875rem;
+      transition: all 0.2s var(--ch-ease); font-family: var(--ch-font);
+    }
+    .form-group input:focus, .ch-input:focus {
+      outline: none; border-color: var(--ch-accent);
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.15), 0 0 16px rgba(99,102,241,0.08);
+    }
+    .form-group input.error, .ch-input.error {
+      border-color: var(--ch-danger);
+      box-shadow: 0 0 0 3px rgba(248,113,113,0.1);
+    }
+    .btn-submit, .ch-btn {
+      display: flex; align-items: center; justify-content: center;
+      width: 100%; padding: 0.6875rem 1rem; border-radius: var(--ch-radius-sm);
+      border: none; color: #fff; font-size: 0.875rem; font-weight: 600;
+      cursor: pointer; font-family: var(--ch-font);
+      background: linear-gradient(135deg, var(--ch-accent), var(--ch-purple));
+      transition: all 0.2s var(--ch-ease);
+      animation: fadeUp 0.5s var(--ch-ease) 0.3s both;
+      margin-top: 1.5rem;
+      box-shadow: 0 2px 12px rgba(99,102,241,0.2);
+    }
+    .btn-submit:hover, .ch-btn:hover {
+      box-shadow: 0 4px 20px rgba(99,102,241,0.35);
+      transform: translateY(-1px);
+    }
+    .btn-submit:active, .ch-btn:active { transform: scale(0.98); }
+    .btn-submit:disabled, .ch-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+    .ch-btn-ghost {
+      background: transparent; border: 1px solid var(--ch-border);
+      color: var(--ch-text-muted); box-shadow: none; margin-top: 0.75rem;
+    }
+    .ch-btn-ghost:hover {
+      border-color: var(--ch-border-active); color: var(--ch-text);
+      background: rgba(99,102,241,0.05); box-shadow: none; transform: none;
+    }
+    .footer-text {
+      text-align: center; margin-top: 2rem; font-size: 0.6875rem; color: var(--ch-text-dim);
+      display: flex; align-items: center; justify-content: center; gap: 0.375rem;
+      animation: fadeUp 0.5s var(--ch-ease) 0.4s both;
+    }
+    .footer-text svg { width: 12px; height: 12px; }
+    .link { color: var(--ch-accent); text-decoration: none; font-size: 0.875rem; transition: color 0.2s; }
+    .link:hover { color: var(--ch-accent-hover); text-decoration: none; }
+    .forgot-link {
+      display: block; text-align: center; color: var(--ch-text-dim);
+      font-size: 0.875rem; text-decoration: none; margin-top: 1rem; transition: color 0.2s;
+    }
+    .forgot-link:hover { color: var(--ch-accent); }
+    .back-link {
+      display: block; text-align: center; color: var(--ch-text-dim);
+      font-size: 0.875rem; text-decoration: none; transition: color 0.2s;
+    }
+    .back-link:hover { color: var(--ch-accent); }
+    .field { margin-bottom: 1.25rem; }
+    .hint { font-size: 0.8rem; color: var(--ch-text-dim); margin-top: 0.35rem; }
+    .divider {
+      display: flex; align-items: center; margin: 1.5rem 0;
+      color: var(--ch-text-dim); font-size: 0.875rem;
+    }
+    .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--ch-border); }
+    .divider span { padding: 0 1rem; }
+    .btn-github {
+      display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+      width: 100%; padding: 0.875rem; background: var(--ch-surface-2);
+      color: var(--ch-text); border: 1px solid var(--ch-border);
+      border-radius: var(--ch-radius-sm); font-size: 1rem; font-weight: 600;
+      cursor: pointer; transition: all 0.2s; text-decoration: none;
+    }
+    .btn-github:hover { background: var(--ch-surface); border-color: var(--ch-accent); }
+    .btn-github svg { width: 20px; height: 20px; }
+    .validation-msg {
+      font-size: 0.8125rem; margin-top: -1rem; margin-bottom: 1rem;
+      padding: 0.5rem; border-radius: 6px; display: none;
+    }
+    .validation-msg.show { display: block; }
+    .validation-msg.error { background: rgba(248,113,113,0.1); color: #fca5a5; }
+    .validation-msg.success { background: rgba(52,211,153,0.1); color: #6ee7b7; }
+    .info-box {
+      background: rgba(99,102,241,0.06); border: 1px solid rgba(99,102,241,0.15);
+      border-radius: var(--ch-radius-sm); padding: 1rem; margin-bottom: 1.5rem;
+      font-size: 0.85rem; color: var(--ch-text-muted); line-height: 1.5;
+    }
+  `;
+}
+
+function chimeraLogoSVG() {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>';
+}
+
 // ---------- Error Handling Helpers ----------
 
 function errorPageHTML(statusCode, title, message, details = null) {
@@ -638,10 +835,8 @@ function errorPageHTML(statusCode, title, message, details = null) {
     : "";
 
   const retryButton = (statusCode === 502 || statusCode === 503)
-    ? `<button class="btn-retry" onclick="location.reload()">Retry</button>
-       <script>
-         setTimeout(() => location.reload(), 5000);
-       </script>`
+    ? `<button class="btn-submit" onclick="location.reload()" style="max-width:200px;margin:0 auto;">Retry</button>
+       <script>setTimeout(() => location.reload(), 5000);</script>`
     : "";
 
   return `<!doctype html>
@@ -651,50 +846,25 @@ function errorPageHTML(statusCode, title, message, details = null) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${statusCode} - ${escapeHtml(title)}</title>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #09090b; color: #fafafa; min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-      padding: 1.5rem;
-    }
-    .error-container {
-      max-width: 480px; width: 100%; text-align: center;
-    }
+    ${chimeraBaseCSS()}
+    .error-container { max-width: 480px; width: 100%; text-align: center; }
     .status-code {
-      font-size: 6rem; font-weight: 700; color: #ef4444;
-      line-height: 1; margin-bottom: 1rem;
-      text-shadow: 0 0 40px rgba(239, 68, 68, 0.3);
+      font-size: 6rem; font-weight: 700; line-height: 1; margin-bottom: 1rem;
+      background: linear-gradient(135deg, var(--ch-danger), var(--ch-purple));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+      animation: fadeUp 0.5s var(--ch-ease) both, breathe 4s ease-in-out infinite;
     }
-    h1 {
-      font-size: 1.5rem; font-weight: 600; margin-bottom: 0.75rem;
-      color: #fafafa; letter-spacing: -0.02em;
-    }
-    p {
-      font-size: 0.9375rem; color: #a1a1aa; line-height: 1.6;
-      margin-bottom: 2rem;
-    }
-    .btn-retry {
-      display: inline-flex; align-items: center; justify-content: center;
-      padding: 0.75rem 1.5rem; border-radius: 10px;
-      border: none; background: #3b82f6; color: #fafafa;
-      font-size: 0.875rem; font-weight: 600; cursor: pointer;
-      transition: all 0.15s; text-decoration: none;
-    }
-    .btn-retry:hover { background: #2563eb; }
+    h1 { text-align: center; }
+    p { font-size: 0.9375rem; color: var(--ch-text-muted); margin-bottom: 2rem; text-align: center; }
     .error-details {
       margin-top: 2rem; text-align: left;
-      background: #131316; border: 1px solid #232329;
-      border-radius: 8px; padding: 1rem;
+      background: var(--ch-surface-glass); backdrop-filter: blur(12px);
+      border: 1px solid var(--ch-border); border-radius: var(--ch-radius-sm); padding: 1rem;
     }
-    .error-details summary {
-      cursor: pointer; font-size: 0.8125rem;
-      color: #71717a; font-weight: 500;
-    }
+    .error-details summary { cursor: pointer; font-size: 0.8125rem; color: var(--ch-text-dim); font-weight: 500; }
     .error-details pre {
-      margin-top: 0.75rem; font-size: 0.75rem;
-      color: #d4d4d8; overflow-x: auto;
-      font-family: ui-monospace, monospace;
+      margin-top: 0.75rem; font-size: 0.75rem; color: var(--ch-text-muted);
+      overflow-x: auto; font-family: var(--ch-font-mono);
     }
   </style>
 </head>
@@ -972,114 +1142,13 @@ function loginPageHTML(error) {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sign in - OpenClaw</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #09090b; color: #fafafa; min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-      overflow: hidden;
-    }
-
-    /* Subtle radial glow */
-    body::before {
-      content: ''; position: fixed; top: -40%; left: 50%; transform: translateX(-50%);
-      width: 800px; height: 600px; border-radius: 50%;
-      background: radial-gradient(ellipse, rgba(59,130,246,0.06) 0%, transparent 70%);
-      pointer-events: none; z-index: 0;
-    }
-
-    @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
-    @keyframes scaleIn { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
-
-    .login-wrapper {
-      width: 100%; max-width: 360px; padding: 1.5rem;
-      position: relative; z-index: 1;
-    }
-    .logo-mark {
-      width: 44px; height: 44px; border-radius: 12px;
-      background: #131316; border: 1px solid #232329;
-      display: flex; align-items: center; justify-content: center;
-      margin: 0 auto 1.5rem;
-      animation: scaleIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-      box-shadow: 0 0 0 4px rgba(59,130,246,0.06), 0 4px 24px rgba(0,0,0,0.4);
-    }
-    .logo-mark svg { width: 22px; height: 22px; color: #3b82f6; }
-    h1 {
-      font-size: 1.125rem; font-weight: 600; text-align: center;
-      letter-spacing: -0.02em; line-height: 1.3;
-      animation: fadeUp 0.45s cubic-bezier(0.4,0,0.2,1) 0.1s both;
-    }
-    .subtitle {
-      color: #71717a; font-size: 0.8125rem; text-align: center;
-      margin-top: 0.375rem; margin-bottom: 2rem;
-      animation: fadeUp 0.45s cubic-bezier(0.4,0,0.2,1) 0.15s both;
-    }
-    .alert {
-      padding: 0.75rem 1rem; border-radius: 10px; font-size: 0.8125rem;
-      margin-bottom: 1.25rem; line-height: 1.5;
-      animation: fadeUp 0.4s cubic-bezier(0.4,0,0.2,1) 0.2s both;
-    }
-    .alert-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(127,29,29,0.5); color: #fca5a5; }
-    .alert-warn { background: rgba(234,179,8,0.06); border: 1px solid rgba(133,77,14,0.5); color: #fde68a; }
-    .alert-owner { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.3); color: #bfdbfe; }
-    .alert code {
-      background: #1c1c21; padding: 0.1rem 0.3rem; border-radius: 3px;
-      font-size: 0.75rem; color: #d4d4d8;
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    }
-    .form-group {
-      margin-bottom: 1rem;
-      animation: fadeUp 0.45s cubic-bezier(0.4,0,0.2,1) 0.2s both;
-    }
-    .form-group label {
-      display: block;
-      font-size: 0.8125rem;
-      font-weight: 500;
-      margin-bottom: 0.375rem;
-      color: #d4d4d8;
-    }
-    .form-group input {
-      width: 100%;
-      padding: 0.625rem 0.875rem;
-      border-radius: 8px;
-      border: 1px solid #232329;
-      background: #131316;
-      color: #fafafa;
-      font-size: 0.875rem;
-      transition: all 0.15s cubic-bezier(0.4,0,0.2,1);
-    }
-    .form-group input:focus {
-      outline: none;
-      border-color: #3b82f6;
-      box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
-    }
-    .btn-submit {
-      display: flex; align-items: center; justify-content: center;
-      width: 100%; padding: 0.6875rem 1rem; border-radius: 10px;
-      border: none; background: #3b82f6; color: #fafafa;
-      font-size: 0.875rem; font-weight: 600; cursor: pointer;
-      transition: all 0.15s cubic-bezier(0.4,0,0.2,1);
-      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.3s both;
-      margin-top: 1.5rem;
-    }
-    .btn-submit:hover { background: #2563eb; box-shadow: 0 2px 12px rgba(59,130,246,0.3); }
-    .btn-submit:active { transform: scale(0.98); }
-    .footer-text {
-      text-align: center; margin-top: 2rem; font-size: 0.6875rem; color: #3f3f46;
-      display: flex; align-items: center; justify-content: center; gap: 0.375rem;
-      animation: fadeUp 0.5s cubic-bezier(0.4,0,0.2,1) 0.4s both;
-    }
-    .footer-text svg { width: 12px; height: 12px; }
-  </style>
+  <style>${chimeraBaseCSS()}</style>
 </head>
 <body>
-  <div class="login-wrapper">
-    <div class="logo-mark" aria-hidden="true">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-    </div>
+  <div class="ch-card" style="max-width:380px;">
+    <div class="ch-logo" aria-hidden="true">${chimeraLogoSVG()}</div>
     <h1>Welcome to OpenClaw</h1>
-    <p class="subtitle">Sign in to manage your instance</p>
+    <p class="subtitle">Authenticate to manage your instance</p>
     ${errorBlock}
     ${ownerBlock}
     ${notConfigured}
@@ -1096,7 +1165,7 @@ function loginPageHTML(error) {
     </form>
     <p class="footer-text">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-      Secured by username & password
+      Secured connection
     </p>
   </div>
 </body>
@@ -1211,156 +1280,33 @@ app.get("/setup/create-password", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Create Setup Password</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #09090b;
-      --surface: #131316;
-      --surface-2: #1c1c21;
-      --border: #232329;
-      --text: #f4f4f5;
-      --text-dim: #a1a1aa;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --error: #ef4444;
-      --success: #22c55e;
-    }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 1rem;
-    }
-    .container {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 2.5rem 2rem;
-      max-width: 480px;
-      width: 100%;
-    }
-    h1 {
-      font-size: 1.75rem;
-      font-weight: 700;
-      margin-bottom: 0.5rem;
-      text-align: center;
-    }
-    .subtitle {
-      color: var(--text-dim);
-      text-align: center;
-      margin-bottom: 2rem;
-      font-size: 0.95rem;
-      line-height: 1.5;
-    }
-    .alert {
-      padding: 0.875rem;
-      border-radius: 8px;
-      margin-bottom: 1.5rem;
-      font-size: 0.9rem;
-    }
-    .alert-error {
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid rgba(239, 68, 68, 0.3);
-      color: #fca5a5;
-    }
-    .info-box {
-      background: rgba(59, 130, 246, 0.08);
-      border: 1px solid rgba(59, 130, 246, 0.2);
-      border-radius: 8px;
-      padding: 1rem;
-      margin-bottom: 1.5rem;
-      font-size: 0.85rem;
-      color: var(--text-dim);
-      line-height: 1.5;
-    }
-    .field { margin-bottom: 1.25rem; }
-    label {
-      display: block;
-      margin-bottom: 0.5rem;
-      font-weight: 500;
-      font-size: 0.9rem;
-    }
-    input[type="password"] {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--surface-2);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--text);
-      font-size: 1rem;
-      font-family: inherit;
-      transition: border-color 0.2s;
-    }
-    input[type="password"]:focus {
-      outline: none;
-      border-color: var(--primary);
-    }
-    .hint {
-      font-size: 0.8rem;
-      color: var(--text-dim);
-      margin-top: 0.35rem;
-    }
-    button {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--primary);
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-      font-family: inherit;
-      margin-top: 0.5rem;
-    }
-    button:hover { background: var(--primary-hover); }
-    button:active { transform: scale(0.98); }
-  </style>
+  <title>Secure Your Instance - OpenClaw</title>
+  <style>${chimeraBaseCSS()}</style>
 </head>
 <body>
-  <div class="container">
-    <h1>Create Setup Password</h1>
-    <p class="subtitle">Welcome! Create a password to protect the setup panel.<br/>You will use this password each time you access /setup.</p>
+  <div class="ch-card" style="max-width:480px;">
+    <div class="ch-logo" aria-hidden="true">${chimeraLogoSVG()}</div>
+    <h1>Secure Your Instance</h1>
+    <p class="subtitle">Create a password to protect the setup panel. You will use this each time you access /setup.</p>
     ${errorBlock}
     <div class="info-box">
       This password is saved to the server. You can also set it via the <code>SETUP_PASSWORD</code> environment variable to skip this step.
     </div>
     <form method="POST" action="/setup/save-password">
       <div class="field">
-        <label for="password">New Password</label>
-        <input
-          type="password"
-          id="password"
-          name="password"
-          autocomplete="new-password"
-          required
-          autofocus
-          minlength="8"
-        />
+        <label class="field-label" for="password">New Password</label>
+        <input class="ch-input" type="password" id="password" name="password" autocomplete="new-password" required autofocus minlength="8" />
         <p class="hint">Minimum 8 characters</p>
       </div>
       <div class="field">
-        <label for="confirm">Confirm Password</label>
-        <input
-          type="password"
-          id="confirm"
-          name="confirm"
-          autocomplete="new-password"
-          required
-          minlength="8"
-        />
+        <label class="field-label" for="confirm">Confirm Password</label>
+        <input class="ch-input" type="password" id="confirm" name="confirm" autocomplete="new-password" required minlength="8" />
       </div>
-      <button type="submit">Create Password & Continue</button>
+      <button type="submit" class="btn-submit" style="margin-top:0.5rem;">Create Password & Continue</button>
     </form>
   </div>
 </body>
-</html>`);
+</html>`);;
 });
 
 app.post("/setup/save-password", express.urlencoded({ extended: false }), (req, res) => {
@@ -1406,142 +1352,26 @@ app.get("/setup/password-prompt", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Setup Password Required</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #09090b;
-      --surface: #131316;
-      --surface-2: #1c1c21;
-      --border: #232329;
-      --text: #f4f4f5;
-      --text-dim: #a1a1aa;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --error: #ef4444;
-    }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 1rem;
-    }
-    .container {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 2.5rem 2rem;
-      max-width: 420px;
-      width: 100%;
-    }
-    h1 {
-      font-size: 1.75rem;
-      font-weight: 700;
-      margin-bottom: 0.5rem;
-      text-align: center;
-    }
-    .subtitle {
-      color: var(--text-dim);
-      text-align: center;
-      margin-bottom: 2rem;
-      font-size: 0.95rem;
-    }
-    .alert {
-      padding: 0.875rem;
-      border-radius: 8px;
-      margin-bottom: 1.5rem;
-      font-size: 0.9rem;
-    }
-    .alert-error {
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid rgba(239, 68, 68, 0.3);
-      color: #fca5a5;
-    }
-    label {
-      display: block;
-      margin-bottom: 0.5rem;
-      font-weight: 500;
-      font-size: 0.9rem;
-    }
-    input[type="password"] {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--surface-2);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--text);
-      font-size: 1rem;
-      font-family: inherit;
-      margin-bottom: 1.5rem;
-      transition: border-color 0.2s;
-    }
-    input[type="password"]:focus {
-      outline: none;
-      border-color: var(--primary);
-    }
-    button {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--primary);
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-      font-family: inherit;
-    }
-    button:hover {
-      background: var(--primary-hover);
-    }
-    button:active {
-      transform: scale(0.98);
-    }
-    .link {
-      color: var(--primary);
-      text-decoration: none;
-      font-size: 0.875rem;
-    }
-    .link:hover {
-      text-decoration: underline;
-    }
-    .link-container {
-      text-align: center;
-      margin-top: 1rem;
-    }
-  </style>
+  <title>Setup Password - OpenClaw</title>
+  <style>${chimeraBaseCSS()}</style>
 </head>
 <body>
-  <div class="container">
-    <h1>🔐 Setup Password</h1>
+  <div class="ch-card">
+    <div class="ch-logo" aria-hidden="true">${chimeraLogoSVG()}</div>
+    <h1>Setup Password</h1>
     <p class="subtitle">Enter the password to access the setup panel</p>
     ${errorBlock}
     <form method="POST" action="/setup/verify-password">
-      <label for="password">Password</label>
-      <input 
-        type="password" 
-        id="password" 
-        name="password" 
-        autocomplete="current-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        required 
-        autofocus 
-      />
-      <button type="submit">Continue</button>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" autocorrect="off" autocapitalize="off" spellcheck="false" required autofocus />
+      </div>
+      <button type="submit" class="btn-submit" style="margin-top:0.75rem;">Continue</button>
     </form>
-    <div class="link-container">
-      <a href="/setup/forgot-password" class="link">Forgot password?</a>
-    </div>
+    <a href="/setup/forgot-password" class="forgot-link">Forgot password?</a>
   </div>
 </body>
-</html>`);
+</html>`);;
 });
 
 // Simple rate limiter for password verification (prevent brute force)
@@ -1615,70 +1445,27 @@ app.get("/setup/forgot-password-legacy", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Forgot Password</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #09090b;
-      --surface: #131316;
-      --border: #232329;
-      --text: #f4f4f5;
-      --primary: #3b82f6;
-      --error: #ef4444;
-      --success: #22c55e;
-    }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 1rem;
-    }
-    .container {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 2.5rem 2rem;
-      max-width: 420px;
-      width: 100%;
-    }
-    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; text-align: center; }
-    .subtitle { color: #a1a1aa; font-size: 0.95rem; text-align: center; margin-bottom: 1.5rem; line-height: 1.5; }
-    form { display: flex; flex-direction: column; gap: 1rem; }
-    label { font-size: 0.875rem; font-weight: 500; display: block; margin-bottom: 0.375rem; }
-    input { background: #1c1c21; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; color: var(--text); font-size: 1rem; }
-    input:focus { outline: none; border-color: var(--primary); }
-    button { background: var(--primary); border: none; border-radius: 8px; padding: 0.75rem; color: white; font-weight: 600; cursor: pointer; font-size: 1rem; }
-    button:hover { background: #2563eb; }
-    button:active { transform: scale(0.98); }
-    .alert { padding: 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem; }
-    .alert-error { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
-    .alert-success { background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); color: #86efac; }
-    .link { color: var(--primary); text-decoration: none; }
-    .link:hover { text-decoration: underline; }
-    .back-link { text-align: center; margin-top: 1rem; }
-  </style>
+  <title>Forgot Password - OpenClaw</title>
+  <style>${chimeraBaseCSS()}</style>
 </head>
 <body>
-  <div class="container">
+  <div class="ch-card">
+    <div class="ch-logo" aria-hidden="true">${chimeraLogoSVG()}</div>
     <h1>Forgot Password</h1>
     <p class="subtitle">Enter your email address to receive a password reset link.</p>
     ${messageBlock}
     ${errorBlock}
-    <form method="POST" action="/setup/request-reset-legacy">
-      <label for="email">Email Address</label>
-      <input type="email" id="email" name="email" placeholder="your@email.com" required>
-      <button type="submit">Send Reset Link</button>
+    <form method="POST" action="/setup/request-reset-legacy" style="display:flex;flex-direction:column;gap:1rem;">
+      <div class="form-group" style="margin-bottom:0;">
+        <label for="email">Email Address</label>
+        <input type="email" id="email" name="email" placeholder="your@email.com" required />
+      </div>
+      <button type="submit" class="btn-submit" style="margin-top:0.5rem;">Send Reset Link</button>
     </form>
-    <div class="back-link">
-      <a href="/setup/password-prompt" class="link">Back to Login</a>
-    </div>
+    <a href="/setup/password-prompt" class="back-link" style="margin-top:1rem;">Back to Sign In</a>
   </div>
 </body>
-</html>`);
+</html>`);;
 });
 
 app.post("/setup/request-reset-legacy", express.urlencoded({ extended: false }), (req, res) => {
@@ -1755,134 +1542,25 @@ app.get("/setup/reset-password-legacy", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Reset Password</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #09090b;
-      --surface: #131316;
-      --border: #232329;
-      --text: #f4f4f5;
-      --primary: #3b82f6;
-      --error: #ef4444;
-    }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 1rem;
-    }
-    .container {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 2.5rem 2rem;
-      max-width: 420px;
-      width: 100%;
-    }
-    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; text-align: center; }
-    .subtitle { color: #a1a1aa; font-size: 0.95rem; text-align: center; margin-bottom: 1.5rem; line-height: 1.5; }
-    form { display: flex; flex-direction: column; gap: 1rem; }
-    label { font-size: 0.875rem; font-weight: 500; display: block; margin-bottom: 0.375rem; }
-    input { background: #1c1c21; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; color: var(--text); font-size: 1rem; font-family: monospace; }
-    input:focus { outline: none; border-color: var(--primary); }
-    button { background: var(--primary); border: none; border-radius: 8px; padding: 0.75rem; color: white; font-weight: 600; cursor: pointer; font-size: 1rem; }
-    button:hover { background: #2563eb; }
-    button:active { transform: scale(0.98); }
-    .alert { padding: 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem; }
-    .alert-error { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
-    .link { color: var(--primary); text-decoration: none; }
-    .link:hover { text-decoration: underline; }
-    .back-link { text-align: center; margin-top: 1rem; }
-  </style>
+  <title>Reset Password - OpenClaw</title>
+  <style>${chimeraBaseCSS()}</style>
 </head>
 <body>
-  <div class="container">
+  <div class="ch-card" style="max-width:480px;">
+    <div class="ch-logo" aria-hidden="true">${chimeraLogoSVG()}</div>
     <h1>Reset Password</h1>
     <p class="subtitle">Enter a new password for your OpenClaw setup.</p>
     ${errorBlock}
-    <form method="POST" action="/setup/confirm-reset-legacy">
+    <form method="POST" action="/setup/confirm-reset-legacy" style="display:flex;flex-direction:column;gap:1rem;">
       <input type="hidden" name="token" value="${escapeHtml(token)}">
-      <label for="password">New Password</label>
-      <input type="password" id="password" name="password" placeholder="At least 8 characters" required>
-      <label for="confirm">Confirm Password</label>
-      <input type="password" id="confirm" name="confirm" placeholder="Repeat password" required>
-      <button type="submit">Reset Password</button>
+      <div class="form-group" style="margin-bottom:0;"><label for="password">New Password</label><input type="password" id="password" name="password" placeholder="At least 8 characters" required></div>
+      <div class="form-group" style="margin-bottom:0;"><label for="confirm">Confirm Password</label><input type="password" id="confirm" name="confirm" placeholder="Repeat password" required></div>
+      <button type="submit" class="btn-submit" style="margin-top:0.5rem;">Reset Password</button>
     </form>
-    <div class="back-link">
-      <a href="/setup/password-prompt" class="link">Back to Login</a>
-    </div>
+    <a href="/setup/password-prompt" class="back-link" style="margin-top:1rem;">Back to Sign In</a>
   </div>
-  
-  <script>
-    const form = document.getElementById('createForm');
-    const password = document.getElementById('password');
-    const confirmPassword = document.getElementById('confirmPassword');
-    const validationMsg = document.getElementById('validationMsg');
-    const submitBtn = document.getElementById('submitBtn');
-    
-    function validatePasswords() {
-      const pwd = password.value;
-      const confirm = confirmPassword.value;
-      
-      // Clear previous validation
-      validationMsg.classList.remove('show', 'error', 'success');
-      password.classList.remove('error');
-      confirmPassword.classList.remove('error');
-      submitBtn.disabled = false;
-      
-      if (pwd.length === 0 && confirm.length === 0) {
-        return;
-      }
-      
-      if (pwd.length > 0 && pwd.length < 8) {
-        validationMsg.textContent = 'Password must be at least 8 characters';
-        validationMsg.classList.add('show', 'error');
-        password.classList.add('error');
-        submitBtn.disabled = true;
-        return;
-      }
-      
-      if (confirm.length > 0 && pwd !== confirm) {
-        validationMsg.textContent = 'Passwords do not match';
-        validationMsg.classList.add('show', 'error');
-        confirmPassword.classList.add('error');
-        submitBtn.disabled = true;
-        return;
-      }
-      
-      if (pwd.length >= 8 && pwd === confirm && confirm.length > 0) {
-        validationMsg.textContent = 'Passwords match ✓';
-        validationMsg.classList.add('show', 'success');
-      }
-    }
-    
-    password.addEventListener('input', validatePasswords);
-    confirmPassword.addEventListener('input', validatePasswords);
-    
-    form.addEventListener('submit', (e) => {
-      const pwd = password.value;
-      const confirm = confirmPassword.value;
-      
-      if (pwd.length < 8) {
-        e.preventDefault();
-        alert('Password must be at least 8 characters');
-        return;
-      }
-      
-      if (pwd !== confirm) {
-        e.preventDefault();
-        alert('Passwords do not match');
-        return;
-      }
-    });
-  </script>
 </body>
-</html>`);
+</html>`);;
 });
 
 // Handle password creation
@@ -1955,189 +1633,27 @@ app.get("/setup/password-prompt", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sign In - Setup Panel</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #09090b;
-      --surface: #131316;
-      --surface-2: #1c1c21;
-      --border: #232329;
-      --text: #f4f4f5;
-      --text-dim: #a1a1aa;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --error: #ef4444;
-      --success: #22c55e;
-    }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 1rem;
-    }
-    .container {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 2.5rem 2rem;
-      max-width: 420px;
-      width: 100%;
-    }
-    h1 {
-      font-size: 1.75rem;
-      font-weight: 700;
-      margin-bottom: 0.5rem;
-      text-align: center;
-    }
-    .subtitle {
-      color: var(--text-dim);
-      text-align: center;
-      margin-bottom: 2rem;
-      font-size: 0.95rem;
-    }
-    .alert {
-      padding: 0.875rem;
-      border-radius: 8px;
-      margin-bottom: 1.5rem;
-      font-size: 0.9rem;
-    }
-    .alert-error {
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid rgba(239, 68, 68, 0.3);
-      color: #fca5a5;
-    }
-    .alert-success {
-      background: rgba(34, 197, 94, 0.1);
-      border: 1px solid rgba(34, 197, 94, 0.3);
-      color: #86efac;
-    }
-    label {
-      display: block;
-      margin-bottom: 0.5rem;
-      font-weight: 500;
-      font-size: 0.9rem;
-    }
-    input[type="password"] {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--surface-2);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--text);
-      font-size: 1rem;
-      font-family: inherit;
-      margin-bottom: 0.75rem;
-      transition: border-color 0.2s;
-    }
-    input[type="password"]:focus {
-      outline: none;
-      border-color: var(--primary);
-    }
-    button {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--primary);
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-      font-family: inherit;
-    }
-    button:hover {
-      background: var(--primary-hover);
-    }
-    button:active {
-      transform: scale(0.98);
-    }
-    .forgot-link {
-      display: block;
-      text-align: center;
-      color: var(--text-dim);
-      font-size: 0.875rem;
-      text-decoration: none;
-      margin-top: 1rem;
-      transition: color 0.2s;
-    }
-    .forgot-link:hover {
-      color: var(--primary);
-    }
-    .divider {
-      display: flex;
-      align-items: center;
-      margin: 1.5rem 0;
-      color: var(--text-dim);
-      font-size: 0.875rem;
-    }
-    .divider::before,
-    .divider::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: var(--border);
-    }
-    .divider span {
-      padding: 0 1rem;
-    }
-    .btn-github {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--surface-2);
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-      text-decoration: none;
-    }
-    .btn-github:hover {
-      background: var(--surface);
-      border-color: var(--primary);
-    }
-    .btn-github svg {
-      width: 20px;
-      height: 20px;
-    }
-  </style>
+  <title>Sign In - OpenClaw Setup</title>
+  <style>${chimeraBaseCSS()}</style>
 </head>
 <body>
-  <div class="container">
-    <h1>🔐 Sign In</h1>
+  <div class="ch-card">
+    <div class="ch-logo" aria-hidden="true">${chimeraLogoSVG()}</div>
+    <h1>Sign In</h1>
     <p class="subtitle">Enter your password to access the setup panel</p>
     ${errorBlock}${successBlock}
     <form method="POST" action="/setup/verify-password">
-      <label for="password">Password</label>
-      <input 
-        type="password" 
-        id="password" 
-        name="password" 
-        autocomplete="current-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        required 
-        autofocus 
-      />
-      <button type="submit">Sign In</button>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" autocorrect="off" autocapitalize="off" spellcheck="false" required autofocus />
+      </div>
+      <button type="submit" class="btn-submit" style="margin-top:0.75rem;">Sign In</button>
     </form>
     <a href="/setup/forgot-password" class="forgot-link">Forgot Password?</a>
     ${githubSection}
   </div>
 </body>
-</html>`);
+</html>`);;
 });
 
 // Simple rate limiter for password operations (prevent brute force)
@@ -2226,124 +1742,24 @@ app.get("/setup/forgot-password", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Forgot Password</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #09090b;
-      --surface: #131316;
-      --surface-2: #1c1c21;
-      --border: #232329;
-      --text: #f4f4f5;
-      --text-dim: #a1a1aa;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --info: #0ea5e9;
-    }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 1rem;
-    }
-    .container {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 2.5rem 2rem;
-      max-width: 520px;
-      width: 100%;
-    }
-    h1 {
-      font-size: 1.75rem;
-      font-weight: 700;
-      margin-bottom: 0.5rem;
-      text-align: center;
-    }
-    .subtitle {
-      color: var(--text-dim);
-      text-align: center;
-      margin-bottom: 2rem;
-      font-size: 0.95rem;
-      line-height: 1.5;
-    }
-    .alert {
-      padding: 1rem;
-      border-radius: 8px;
-      margin-bottom: 1.5rem;
-      font-size: 0.875rem;
-      line-height: 1.6;
-    }
-    .alert-info {
-      background: rgba(14, 165, 233, 0.1);
-      border: 1px solid rgba(14, 165, 233, 0.3);
-      color: #7dd3fc;
-    }
-    .alert ul {
-      list-style: disc;
-    }
-    .alert code {
-      background: rgba(255, 255, 255, 0.05);
-      padding: 0.125rem 0.375rem;
-      border-radius: 4px;
-      font-family: monospace;
-      font-size: 0.8125rem;
-    }
-    button {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--primary);
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-      font-family: inherit;
-      margin-bottom: 1rem;
-    }
-    button:hover:not(:disabled) {
-      background: var(--primary-hover);
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    button:active:not(:disabled) {
-      transform: scale(0.98);
-    }
-    .back-link {
-      display: block;
-      text-align: center;
-      color: var(--text-dim);
-      font-size: 0.875rem;
-      text-decoration: none;
-      transition: color 0.2s;
-    }
-    .back-link:hover {
-      color: var(--primary);
-    }
-  </style>
+  <title>Forgot Password - OpenClaw</title>
+  <style>${chimeraBaseCSS()}</style>
 </head>
 <body>
-  <div class="container">
-    <h1>🔑 Forgot Password</h1>
+  <div class="ch-card" style="max-width:520px;">
+    <div class="ch-logo" aria-hidden="true">${chimeraLogoSVG()}</div>
+    <h1>Forgot Password</h1>
     <p class="subtitle">Request a password reset link via email</p>
     ${helpText}
     <form method="POST" action="/setup/forgot-password">
-      <button type="submit" ${!emailConfigured ? 'disabled' : ''}>
+      <button type="submit" class="btn-submit" style="margin-top:0;" ${!emailConfigured ? 'disabled' : ''}>
         ${emailConfigured ? 'Send Reset Link' : 'Email Not Configured'}
       </button>
     </form>
-    <a href="/setup/password-prompt" class="back-link">← Back to Sign In</a>
+    <a href="/setup/password-prompt" class="back-link" style="margin-top:1rem;">Back to Sign In</a>
   </div>
 </body>
-</html>`);
+</html>`);;
 });
 
 // Handle forgot password submission
@@ -2405,233 +1821,55 @@ app.get("/setup/reset-password", (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Reset Password</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #09090b;
-      --surface: #131316;
-      --surface-2: #1c1c21;
-      --border: #232329;
-      --text: #f4f4f5;
-      --text-dim: #a1a1aa;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --error: #ef4444;
-      --success: #22c55e;
-    }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 1rem;
-    }
-    .container {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 2.5rem 2rem;
-      max-width: 480px;
-      width: 100%;
-    }
-    h1 {
-      font-size: 1.75rem;
-      font-weight: 700;
-      margin-bottom: 0.5rem;
-      text-align: center;
-    }
-    .subtitle {
-      color: var(--text-dim);
-      text-align: center;
-      margin-bottom: 2rem;
-      font-size: 0.95rem;
-      line-height: 1.5;
-    }
-    label {
-      display: block;
-      margin-bottom: 0.5rem;
-      font-weight: 500;
-      font-size: 0.9rem;
-    }
-    input[type="password"] {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--surface-2);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--text);
-      font-size: 1rem;
-      font-family: inherit;
-      margin-bottom: 1.5rem;
-      transition: border-color 0.2s;
-    }
-    input[type="password"]:focus {
-      outline: none;
-      border-color: var(--primary);
-    }
-    input[type="password"].error {
-      border-color: var(--error);
-    }
-    button {
-      width: 100%;
-      padding: 0.875rem;
-      background: var(--primary);
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-      font-family: inherit;
-    }
-    button:hover:not(:disabled) {
-      background: var(--primary-hover);
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    button:active:not(:disabled) {
-      transform: scale(0.98);
-    }
-    .hint {
-      font-size: 0.8125rem;
-      color: var(--text-dim);
-      margin-top: -1rem;
-      margin-bottom: 1.5rem;
-    }
-    .validation-msg {
-      font-size: 0.8125rem;
-      margin-top: -1rem;
-      margin-bottom: 1rem;
-      padding: 0.5rem;
-      border-radius: 6px;
-      display: none;
-    }
-    .validation-msg.show {
-      display: block;
-    }
-    .validation-msg.error {
-      background: rgba(239, 68, 68, 0.1);
-      color: #fca5a5;
-    }
-    .validation-msg.success {
-      background: rgba(34, 197, 94, 0.1);
-      color: #86efac;
-    }
-  </style>
+  <title>Reset Password - OpenClaw</title>
+  <style>${chimeraBaseCSS()}</style>
 </head>
 <body>
-  <div class="container">
-    <h1>🔑 Reset Password</h1>
+  <div class="ch-card" style="max-width:480px;">
+    <div class="ch-logo" aria-hidden="true">${chimeraLogoSVG()}</div>
+    <h1>Reset Password</h1>
     <p class="subtitle">Choose a new password for your setup panel</p>
     ${errorBlock}
     <form method="POST" action="/setup/reset-password" id="resetForm">
       <input type="hidden" name="token" value="${escapeHtml(token)}" />
-      
-      <label for="password">New Password</label>
-      <input 
-        type="password" 
-        id="password" 
-        name="password" 
-        autocomplete="new-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        minlength="8"
-        required 
-        autofocus 
-      />
-      <p class="hint">Minimum 8 characters</p>
-      
-      <label for="confirmPassword">Confirm Password</label>
-      <input 
-        type="password" 
-        id="confirmPassword" 
-        name="confirmPassword" 
-        autocomplete="new-password"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        minlength="8"
-        required 
-      />
-      
+      <div class="field">
+        <label class="field-label" for="password">New Password</label>
+        <input class="ch-input" type="password" id="password" name="password" autocomplete="new-password" minlength="8" required autofocus />
+        <p class="hint">Minimum 8 characters</p>
+      </div>
+      <div class="field">
+        <label class="field-label" for="confirmPassword">Confirm Password</label>
+        <input class="ch-input" type="password" id="confirmPassword" name="confirmPassword" autocomplete="new-password" minlength="8" required />
+      </div>
       <div id="validationMsg" class="validation-msg"></div>
-      
-      <button type="submit" id="submitBtn">Reset Password</button>
+      <button type="submit" class="btn-submit" id="submitBtn" style="margin-top:0.5rem;">Reset Password</button>
     </form>
   </div>
-  
   <script>
     const form = document.getElementById('resetForm');
     const password = document.getElementById('password');
     const confirmPassword = document.getElementById('confirmPassword');
     const validationMsg = document.getElementById('validationMsg');
     const submitBtn = document.getElementById('submitBtn');
-    
     function validatePasswords() {
-      const pwd = password.value;
-      const confirm = confirmPassword.value;
-      
-      validationMsg.classList.remove('show', 'error', 'success');
-      password.classList.remove('error');
-      confirmPassword.classList.remove('error');
+      const pwd = password.value; const confirm = confirmPassword.value;
+      validationMsg.classList.remove('show','error','success');
+      password.classList.remove('error'); confirmPassword.classList.remove('error');
       submitBtn.disabled = false;
-      
-      if (pwd.length === 0 && confirm.length === 0) {
-        return;
-      }
-      
-      if (pwd.length > 0 && pwd.length < 8) {
-        validationMsg.textContent = 'Password must be at least 8 characters';
-        validationMsg.classList.add('show', 'error');
-        password.classList.add('error');
-        submitBtn.disabled = true;
-        return;
-      }
-      
-      if (confirm.length > 0 && pwd !== confirm) {
-        validationMsg.textContent = 'Passwords do not match';
-        validationMsg.classList.add('show', 'error');
-        confirmPassword.classList.add('error');
-        submitBtn.disabled = true;
-        return;
-      }
-      
-      if (pwd.length >= 8 && pwd === confirm && confirm.length > 0) {
-        validationMsg.textContent = 'Passwords match ✓';
-        validationMsg.classList.add('show', 'success');
-      }
+      if (!pwd.length && !confirm.length) return;
+      if (pwd.length > 0 && pwd.length < 8) { validationMsg.textContent='Password must be at least 8 characters'; validationMsg.classList.add('show','error'); password.classList.add('error'); submitBtn.disabled=true; return; }
+      if (confirm.length > 0 && pwd !== confirm) { validationMsg.textContent='Passwords do not match'; validationMsg.classList.add('show','error'); confirmPassword.classList.add('error'); submitBtn.disabled=true; return; }
+      if (pwd.length >= 8 && pwd === confirm && confirm.length > 0) { validationMsg.textContent='Passwords match'; validationMsg.classList.add('show','success'); }
     }
-    
     password.addEventListener('input', validatePasswords);
     confirmPassword.addEventListener('input', validatePasswords);
-    
     form.addEventListener('submit', (e) => {
-      const pwd = password.value;
-      const confirm = confirmPassword.value;
-      
-      if (pwd.length < 8) {
-        e.preventDefault();
-        alert('Password must be at least 8 characters');
-        return;
-      }
-      
-      if (pwd !== confirm) {
-        e.preventDefault();
-        alert('Passwords do not match');
-        return;
-      }
+      if (password.value.length < 8) { e.preventDefault(); return; }
+      if (password.value !== confirmPassword.value) { e.preventDefault(); return; }
     });
   </script>
 </body>
-</html>`);
+</html>`);;
 });
 
 // Handle reset password submission

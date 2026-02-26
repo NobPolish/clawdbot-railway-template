@@ -4,13 +4,12 @@ import './globals.css'
 import { AuthProvider } from '@/context/AuthContext'
 import { NotificationProvider, ToastContainer } from '@/context/NotificationContext'
 
-const inter = Inter({ subsets: ['latin'] })
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
 
 export const metadata: Metadata = {
-  title: 'Clawdbot - AI Authorization Platform',
-  description: 'Secure, intelligent authorization and seamless onboarding with AI-powered features',
-  viewport: 'width=device-width, initial-scale=1, maximum-scale=5',
-  themeColor: '#2563eb',
+  title: 'OpenClaw - AI Gateway Control Surface',
+  description: 'Self-hosted AI gateway with multi-provider routing, channel orchestration, and full operational control.',
+  themeColor: '#060609',
 }
 
 export default function RootLayout({
@@ -19,8 +18,8 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
-      <body className={inter.className}>
+    <html lang="en" className={inter.variable}>
+      <body className="font-sans antialiased">
         <NotificationProvider>
           <AuthProvider>
             {children}
